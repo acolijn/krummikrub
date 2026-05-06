@@ -392,23 +392,52 @@ function extractableTiles(board: Board): Array<{ tile: Tile; newBoard: Board }> 
 }
 
 /**
- * Superhuman: exhaustive search with board manipulation.
- *
- * Phase 1 — rack tiles only: find all non-overlapping meld combos, then
- *           apply iterative single-tile extensions.
- *
- * Phase 2 — extend-then-extract: seed from the original board AND from every
- *           board reachable by one single-tile rack→board extension.  For each
- *           seeded board, try extracting every extractable tile and forming new
- *           melds from it combined with the remaining rack tiles.
- *
- *   Example: board=[4b,4r,4k], rack=[4o,5b,6b]
- *     → extend with 4o → [4b,4r,4k,4o]  (preBoard)
- *     → extract 4b     → [4r,4k,4o]      (valid group-of-3 remains)
- *     → form [4b,5b,6b] from extracted 4b + rack tiles 5b,6b
- *     → 3 rack tiles placed instead of 0
+ * Return all (joker, newBoard, usedRackTile) triples where a rack tile can
+ * replace a joker in a board meld (the meld stays valid), freeing the joker.
+ * E.g. board has [blue9,blue10,blue11,blue12,★(=blue13)], rack has blue13 →
+ * place blue13, free the joker.
  */
-function findExhaustiveMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMove | null {
+function jokerSwaps(
+  board: Board,
+  rack: Tile[]
+): Array<{ joker: Tile; newBoard: Board; usedRackTile: Tile }> {
+  const results: Array<{ joker: Tile; newBoard: Board; usedRackTile: Tile }> = [];
+  const seen = new Set<string>();
+  for (let mi = 0; mi < board.length; mi++) {
+    const meld = board[mi];
+    for (let ji = 0; ji < meld.length; ji++) {
+      const joker = meld[ji];
+      if (!joker.isJoker) continue;
+      for (const rackTile of rack) {
+        if (rackTile.isJoker) continue;
+        const key = `${joker.id}|${rackTile.id}`;
+        if (seen.has(key)) continue;
+        const candidate = [...meld.slice(0, ji), rackTile, ...meld.slice(ji + 1)];
+        if (isValidMeld(candidate)) {
+          const sorted = sortMeldForDisplay(candidate);
+          const newBoard = board.map((m, i) => (i === mi ? sorted : m));
+          results.push({ joker, newBoard, usedRackTile: rackTile });
+          seen.add(key);
+        }
+      }
+    }
+  }
+  return results;
+}
+
+/**
+ * Superhuman: exhaustive search with full board manipulation.
+ *
+ * Tries three classes of "pre-board mutation" before the main rack search:
+ *   • None         — search directly from the original board + rack
+ *   • Extension    — add one rack tile to an existing meld end, then search
+ *   • Joker swap   — replace a board joker with its real tile from the rack,
+ *                    add the freed joker to the virtual rack, then search
+ *
+ * For each of those starting states it also runs an extract-then-meld search
+ * (Phase 2) that pulls one board tile out of a meld and uses it in new combos.
+ */
+function findExhaustiveMove(rack: Tile[], board: Board, _rackMelds: Meld[]): AiMove | null {
   function endJokerPenalty(b: Board): number {
     let n = 0;
     for (const meld of b) {
@@ -432,110 +461,93 @@ function findExhaustiveMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMo
     }
   }
 
-  // ── Phase 1: rack-only melds ──────────────────────────────────────────────
-  let p1BestPlaced = 0;
-  let p1BestBoard = board;
-  let p1BestRack = rack;
+  /** Exhaustive rack-combo search + iterative extensions from a given state. */
+  function runSearch(startRack: Tile[], startBoard: Board, prePlaced: number) {
+    const melds = findValidMeldsFromRack(startRack);
+    let sBest = 0;
+    let sBestBoard = startBoard;
+    let sBestRack = startRack;
 
-  const search = (
-    available: Meld[],
-    usedIds: Set<string>,
-    curBoard: Board,
-    placed: number
-  ) => {
-    if (placed > p1BestPlaced) {
-      p1BestPlaced = placed;
-      p1BestBoard = curBoard;
-      p1BestRack = rack.filter(t => !usedIds.has(t.id));
-    }
-    for (let i = 0; i < available.length; i++) {
-      const meld = available[i];
-      if (meld.some(t => usedIds.has(t.id))) continue;
-      const newUsed = new Set(usedIds);
-      meld.forEach(t => newUsed.add(t.id));
-      search(available.slice(i + 1), newUsed, [...curBoard, meld], placed + meld.length);
-    }
-  };
+    const search = (available: Meld[], usedIds: Set<string>, curBoard: Board, placed: number) => {
+      if (placed > sBest) {
+        sBest = placed; sBestBoard = curBoard;
+        sBestRack = startRack.filter(t => !usedIds.has(t.id));
+      }
+      for (let i = 0; i < available.length; i++) {
+        const meld = available[i];
+        if (meld.some(t => usedIds.has(t.id))) continue;
+        const newUsed = new Set(usedIds);
+        meld.forEach(t => newUsed.add(t.id));
+        search(available.slice(i + 1), newUsed, [...curBoard, meld], placed + meld.length);
+      }
+    };
 
-  search(rackMelds, new Set<string>(), board, 0);
+    search(melds, new Set<string>(), startBoard, 0);
 
-  if (p1BestPlaced > 0) {
-    const ext = applyExtensions(p1BestBoard, p1BestRack, p1BestPlaced);
-    commitIfBetter(ext.placed, ext.board, ext.rack);
+    const ext = applyExtensions(sBestBoard, sBestRack, sBest);
+    if (ext.placed > sBest) { sBest = ext.placed; sBestBoard = ext.board; sBestRack = ext.rack; }
+    if (sBest > 0) commitIfBetter(prePlaced + sBest, sBestBoard, sBestRack);
   }
 
-  // ── Phase 2: extend-then-extract ─────────────────────────────────────────
-  // Build pre-board candidates: original board (prePlaced=0), and boards
-  // after each valid single-tile rack→board extension (prePlaced=1).
-  // This lets Phase 2 find "add tile A to extend a meld, then extract tile B
-  // from the now-larger meld, then form new melds with B + remaining rack".
-  const preBoardCandidates: Array<{ preBoard: Board; preRack: Tile[]; prePlaced: number }> = [
-    { preBoard: board, preRack: rack, prePlaced: 0 },
-  ];
-  for (const ext of extendBoardWithRackTile(board, rack)) {
-    if (isBoardValid(ext.board)) {
-      preBoardCandidates.push({
-        preBoard: ext.board,
-        preRack: removeTilesFromRack(rack, ext.usedTiles),
-        prePlaced: ext.usedTiles.length,
-      });
-    }
-  }
-
-  for (const { preBoard, preRack, prePlaced } of preBoardCandidates) {
+  /** Extract one tile from the pre-board, form new melds using it + preRack. */
+  function runExtractSearch(preBoard: Board, preRack: Tile[], prePlaced: number) {
     const preRackIds = new Set(preRack.map(t => t.id));
-
     for (const { tile: boardTile, newBoard: extractedBoard } of extractableTiles(preBoard)) {
       const extRack = [...preRack, boardTile];
       const extMelds = findValidMeldsFromRack(extRack);
       const anchors = extMelds.filter(m => m.some(t => t.id === boardTile.id));
       if (anchors.length === 0) continue;
 
-      let p2BestPlaced = 0;
-      let p2BestBoard = extractedBoard;
-      let p2BestRack = preRack;
+      let p2Best = 0;
+      let p2Board = extractedBoard;
+      let p2Rack = preRack;
 
       for (const anchorMeld of anchors) {
-        // Anchor must consume at least one tile from the (pre-)rack
-        const rackInAnchor = anchorMeld.filter(t => preRackIds.has(t.id)).length;
-        if (rackInAnchor === 0) continue;
-
-        const usedAfterAnchor = new Set(anchorMeld.map(t => t.id));
+        if (anchorMeld.filter(t => preRackIds.has(t.id)).length === 0) continue;
+        const usedAfter = new Set(anchorMeld.map(t => t.id));
         const anchorBoard = [...extractedBoard, anchorMeld];
-        const remainingMelds = extMelds.filter(m => !m.some(t => usedAfterAnchor.has(t.id)));
+        const remaining = extMelds.filter(m => !m.some(t => usedAfter.has(t.id)));
 
-        const subSearch = (
-          available: Meld[],
-          usedIds: Set<string>,
-          curBoard: Board,
-          rackPlaced: number
-        ) => {
-          if (rackPlaced > p2BestPlaced) {
-            p2BestPlaced = rackPlaced;
-            p2BestBoard = curBoard;
-            p2BestRack = preRack.filter(t => !usedIds.has(t.id));
+        const sub = (available: Meld[], usedIds: Set<string>, curBoard: Board, placed: number) => {
+          if (placed > p2Best) {
+            p2Best = placed; p2Board = curBoard;
+            p2Rack = preRack.filter(t => !usedIds.has(t.id));
           }
           for (let i = 0; i < available.length; i++) {
             const m = available[i];
             if (m.some(t => usedIds.has(t.id))) continue;
             const newUsed = new Set(usedIds);
             m.forEach(t => newUsed.add(t.id));
-            subSearch(available.slice(i + 1), newUsed, [...curBoard, m], rackPlaced + m.length);
+            sub(available.slice(i + 1), newUsed, [...curBoard, m], placed + m.length);
           }
         };
-
-        subSearch(remainingMelds, usedAfterAnchor, anchorBoard, rackInAnchor);
+        sub(remaining, usedAfter, anchorBoard, anchorMeld.filter(t => preRackIds.has(t.id)).length);
       }
 
-      if (p2BestPlaced > 0) {
-        // totalPlaced = pre-extension tile(s) + Phase-2 rack tiles
-        const totalPlaced = prePlaced + p2BestPlaced;
-        // p2BestRack is a subset of preRack (= original rack − extension tiles),
-        // so it correctly represents the original rack tiles still remaining.
-        const ext2 = applyExtensions(p2BestBoard, p2BestRack, totalPlaced);
-        commitIfBetter(ext2.placed, ext2.board, ext2.rack);
+      if (p2Best > 0) {
+        const ext2 = applyExtensions(p2Board, p2Rack, p2Best);
+        commitIfBetter(prePlaced + ext2.placed, ext2.board, ext2.rack);
       }
     }
+  }
+
+  // ── Original state ────────────────────────────────────────────────────────
+  runSearch(rack, board, 0);
+  runExtractSearch(board, rack, 0);
+
+  // ── Extension mutations: add one rack tile to an existing meld end ────────
+  for (const ext of extendBoardWithRackTile(board, rack)) {
+    if (!isBoardValid(ext.board)) continue;
+    const preRack = removeTilesFromRack(rack, ext.usedTiles);
+    runSearch(preRack, ext.board, ext.usedTiles.length);
+    runExtractSearch(ext.board, preRack, ext.usedTiles.length);
+  }
+
+  // ── Joker-swap mutations: place real tile, free joker for new melds ───────
+  for (const { joker, newBoard: swapBoard, usedRackTile } of jokerSwaps(board, rack)) {
+    const preRack = [...removeTilesFromRack(rack, [usedRackTile]), joker];
+    runSearch(preRack, swapBoard, 1);
+    runExtractSearch(swapBoard, preRack, 1);
   }
 
   if (bestPlaced === 0) return null;
