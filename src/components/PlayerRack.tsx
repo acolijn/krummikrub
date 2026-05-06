@@ -18,17 +18,23 @@ const COLOR_DOT: Record<TileColor, string> = {
 interface Props {
   rack: Tile[];
   isHumanTurn: boolean;
+  selectedTileIds?: string[];
+  onTileClick?: (tileId: string) => void;
+  onRackClick?: () => void;
 }
 
-function EmptySlot() {
+function EmptySlot({ onClick }: { onClick?: () => void }) {
   return (
-    <div className="w-8 h-10 rounded border border-dashed border-gray-700 opacity-40" />
+    <div
+      onClick={onClick}
+      className={`w-8 h-10 rounded border border-dashed border-gray-700 opacity-40 ${onClick ? 'cursor-pointer hover:opacity-70' : ''}`}
+    />
   );
 }
 
-export function PlayerRack({ rack, isHumanTurn }: Props) {
+export function PlayerRack({ rack, isHumanTurn, selectedTileIds, onTileClick, onRackClick }: Props) {
   const { setNodeRef, isOver } = useDroppable({ id: 'rack' });
-
+  const hasSelection = (selectedTileIds?.length ?? 0) > 0;
   const jokers = rack.filter(t => t.isJoker);
 
   const rows = COLORS.map(color => {
@@ -55,9 +61,11 @@ export function PlayerRack({ rack, isHumanTurn }: Props) {
   return (
     <div
       ref={setNodeRef}
+      onClick={onRackClick && hasSelection ? onRackClick : undefined}
       className={`
         p-3 rounded-xl border
         ${isOver ? 'border-yellow-400 bg-yellow-400/10' : 'border-gray-600 bg-gray-900/70'}
+        ${hasSelection ? 'cursor-pointer' : ''}
       `}
     >
       {rows.map(({ color, slots, extras }, rowIdx) => (
@@ -68,8 +76,8 @@ export function PlayerRack({ rack, isHumanTurn }: Props) {
           {/* Fixed slots 1–13 */}
           {slots.map((tile, i) =>
             tile
-              ? <TileCard key={tile.id} tile={tile} draggable={isHumanTurn} small />
-              : <EmptySlot key={i} />
+              ? <TileCard key={tile.id} tile={tile} draggable={isHumanTurn} small isSelected={selectedTileIds?.includes(tile.id) ?? false} onClick={onTileClick} />
+              : <EmptySlot key={i} onClick={onRackClick && hasSelection ? onRackClick : undefined} />
           )}
 
           {/* Separator before right section */}
@@ -79,12 +87,12 @@ export function PlayerRack({ rack, isHumanTurn }: Props) {
 
           {/* Duplicate tiles */}
           {extras.map(tile => (
-            <TileCard key={tile.id} tile={tile} draggable={isHumanTurn} small />
+            <TileCard key={tile.id} tile={tile} draggable={isHumanTurn} small isSelected={selectedTileIds?.includes(tile.id) ?? false} onClick={onTileClick} />
           ))}
 
           {/* Jokers on top row */}
           {rowIdx === 0 && jokers.map(tile => (
-            <TileCard key={tile.id} tile={tile} draggable={isHumanTurn} small />
+            <TileCard key={tile.id} tile={tile} draggable={isHumanTurn} small isSelected={selectedTileIds?.includes(tile.id) ?? false} onClick={onTileClick} />
           ))}
         </div>
       ))}

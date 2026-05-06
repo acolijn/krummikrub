@@ -4,6 +4,7 @@ import {
   isBoardValid,
   meldScore,
   removeTilesFromRack,
+  sortMeldForDisplay,
 } from '../game/logic';
 
 // ─── Find all valid melds from a rack ────────────────────────────────────────
@@ -12,9 +13,16 @@ import {
 // silently cap the tiles it looks at.
 
 export function findValidMeldsFromRack(rack: Tile[]): Meld[] {
-  const melds: Meld[] = [];
+  const results: Meld[] = [];
+  const seen = new Set<string>();
   const jokers = rack.filter(t => t.isJoker);
   const nonJokers = rack.filter(t => !t.isJoker);
+
+  // Deduplicate by sorted tile-id key so the same tile set isn't added twice.
+  function add(meld: Meld) {
+    const key = meld.map(t => t.id).sort().join('|');
+    if (!seen.has(key)) { seen.add(key); results.push(meld); }
+  }
 
   // ── Groups: same number, distinct colors, 3–4 tiles ──────────────────────
   const byNum = new Map<number, Tile[]>();
@@ -23,30 +31,23 @@ export function findValidMeldsFromRack(rack: Tile[]): Meld[] {
     if (list) list.push(t); else byNum.set(t.number, [t]);
   }
   for (const [, tiles] of byNum) {
-    // One representative per color (a group can never have two of the same color)
     const byColor = new Map<string, Tile>();
     for (const t of tiles) if (!byColor.has(t.color)) byColor.set(t.color, t);
     const pool = [...byColor.values()];
 
     for (let i = 0; i < pool.length; i++) {
       // 1 tile + 2 jokers
-      if (jokers.length >= 2) melds.push([pool[i], jokers[0], jokers[1]]);
-
+      if (jokers.length >= 2) add([pool[i], jokers[0], jokers[1]]);
       for (let j = i + 1; j < pool.length; j++) {
-        // 2 tiles + 1 joker
-        if (jokers.length >= 1) melds.push([pool[i], pool[j], jokers[0]]);
-        // 2 tiles + 2 jokers
-        if (jokers.length >= 2) melds.push([pool[i], pool[j], jokers[0], jokers[1]]);
-
+        // 2 tiles + each individual joker (KEY FIX: use each joker separately so
+        // two different 1-joker melds can be combined in the exhaustive search)
+        for (const jk of jokers) add([pool[i], pool[j], jk]);
+        if (jokers.length >= 2) add([pool[i], pool[j], jokers[0], jokers[1]]);
         for (let k = j + 1; k < pool.length; k++) {
-          // 3 tiles (no joker)
-          melds.push([pool[i], pool[j], pool[k]]);
-          // 3 tiles + 1 joker
-          if (jokers.length >= 1) melds.push([pool[i], pool[j], pool[k], jokers[0]]);
-
+          add([pool[i], pool[j], pool[k]]);
+          for (const jk of jokers) add([pool[i], pool[j], pool[k], jk]);
           for (let l = k + 1; l < pool.length; l++) {
-            // 4 tiles (max group size, no joker)
-            melds.push([pool[i], pool[j], pool[k], pool[l]]);
+            add([pool[i], pool[j], pool[k], pool[l]]);
           }
         }
       }
@@ -54,33 +55,47 @@ export function findValidMeldsFromRack(rack: Tile[]): Meld[] {
   }
 
   // ── Runs: same color, consecutive numbers, 3+ tiles ──────────────────────
+  // Build a run template (Tile | null for joker slots) from each start position.
+  // For runs needing 1 joker, emit once per available joker tile so two
+  // independent 1-joker runs are distinguishable by their joker tile id.
   const byColor = new Map<string, Tile[]>();
   for (const t of nonJokers) {
     const list = byColor.get(t.color);
     if (list) list.push(t); else byColor.set(t.color, [t]);
   }
-  for (const [, tiles] of byColor) {
-    tiles.sort((a, b) => a.number - b.number);
+  for (const [, colorTiles] of byColor) {
+    colorTiles.sort((a, b) => a.number - b.number);
     for (let start = 1; start <= 13; start++) {
-      let jIdx = 0;
-      const run: Meld = [];
-      const usedIds = new Set<string>();
+      const template: Array<Tile | null> = [];
+      const usedNums = new Set<number>();
+      let jokersNeeded = 0;
       for (let n = start; n <= 13; n++) {
-        const tile = tiles.find(t => t.number === n && !usedIds.has(t.id));
+        const tile = colorTiles.find(t => t.number === n && !usedNums.has(n));
         if (tile) {
-          run.push(tile);
-          usedIds.add(tile.id);
-        } else if (jIdx < jokers.length) {
-          run.push(jokers[jIdx++]);
+          template.push(tile);
+          usedNums.add(n);
+        } else if (jokersNeeded < jokers.length) {
+          template.push(null); // joker slot
+          jokersNeeded++;
         } else {
-          break; // gap that can't be filled
+          break;
         }
-        if (run.length >= 3) melds.push([...run]);
+        if (template.length >= 3) {
+          if (jokersNeeded === 0) {
+            add([...template] as Tile[]);
+          } else if (jokersNeeded === 1) {
+            // Emit with each available joker so two runs can each get their own
+            for (const jk of jokers) add(template.map(s => s ?? jk));
+          } else {
+            let ji = 0;
+            add(template.map(s => s ?? jokers[ji++]));
+          }
+        }
       }
     }
   }
 
-  return melds;
+  return results;
 }
 
 // ─── Try to extend existing board melds with rack tiles ──────────────────────
@@ -98,18 +113,10 @@ function extendBoardWithRackTile(
   for (const tile of rack) {
     for (let mi = 0; mi < board.length; mi++) {
       const meld = board[mi];
-      // Try appending at start or end, then sort numerically
-      for (const candidate of [
-        [...meld, tile],
-        [tile, ...meld],
-      ]) {
+      for (const candidate of [[tile, ...meld], [...meld, tile]]) {
         if (isValidMeld(candidate)) {
-          const sorted = [...candidate].sort((a, b) => {
-            if (a.isJoker && b.isJoker) return 0;
-            if (a.isJoker) return 1;
-            if (b.isJoker) return -1;
-            return a.number - b.number;
-          });
+          // Use sortMeldForDisplay so jokers land in their proper interior slot
+          const sorted = sortMeldForDisplay(candidate);
           const newBoard = board.map((m, i) => (i === mi ? sorted : m));
           results.push({ board: newBoard, usedTiles: [tile] });
         }
@@ -117,6 +124,30 @@ function extendBoardWithRackTile(
     }
   }
   return results;
+}
+
+/** Iteratively apply single-tile board extensions until no more are possible. */
+function applyExtensions(
+  board: Board,
+  rack: Tile[],
+  placed: number
+): { board: Board; rack: Tile[]; placed: number } {
+  let cur = { board, rack, placed };
+  let improved = true;
+  while (improved) {
+    improved = false;
+    for (const ext of extendBoardWithRackTile(cur.board, cur.rack)) {
+      if (!isBoardValid(ext.board)) continue;
+      cur = {
+        board: ext.board,
+        rack: removeTilesFromRack(cur.rack, ext.usedTiles),
+        placed: cur.placed + ext.usedTiles.length,
+      };
+      improved = true;
+      break; // restart with updated board
+    }
+  }
+  return cur;
 }
 
 // ─── Greedy AI move finder ────────────────────────────────────────────────────
@@ -218,44 +249,46 @@ function findInitialMeldCombinations(rack: Tile[], rackMelds: Meld[], board: Boa
 
 /**
  * Greedy: place as many tiles from rack as possible onto / extending the board.
+ * Tries all single melds AND all pairs of non-overlapping melds so the AI
+ * doesn't greedily consume the joker in a run when it could serve a second meld.
  */
 function findGreedyMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMove | null {
   let bestRack = rack;
   let bestBoard = board;
   let bestPlaced = 0;
 
-  // Try adding new melds from rack to the board
+  // Single melds
   for (const meld of rackMelds) {
     const newRack = removeTilesFromRack(rack, meld);
-    const newBoard = [...board, meld];
     const placed = rack.length - newRack.length;
     if (placed > bestPlaced) {
-      bestPlaced = placed;
-      bestRack = newRack;
-      bestBoard = newBoard;
+      bestPlaced = placed; bestRack = newRack; bestBoard = [...board, meld];
     }
   }
 
-  // Also try extending existing melds
-  const extensions = extendBoardWithRackTile(board, rack);
-  for (const ext of extensions) {
-    const newRack = removeTilesFromRack(rack, ext.usedTiles);
-    const placed = rack.length - newRack.length;
-    if (placed > bestPlaced && isBoardValid(ext.board)) {
-      bestPlaced = placed;
-      bestRack = newRack;
-      bestBoard = ext.board;
+  // Pairs of non-overlapping melds (catches joker-in-one + real-meld-in-other)
+  for (let i = 0; i < rackMelds.length; i++) {
+    const ids1 = new Set(rackMelds[i].map(t => t.id));
+    for (let j = i + 1; j < rackMelds.length; j++) {
+      if (rackMelds[j].some(t => ids1.has(t.id))) continue;
+      const combined = [...rackMelds[i], ...rackMelds[j]];
+      const newRack = removeTilesFromRack(rack, combined);
+      const placed = rack.length - newRack.length;
+      if (placed > bestPlaced) {
+        bestPlaced = placed; bestRack = newRack;
+        bestBoard = [...board, rackMelds[i], rackMelds[j]];
+      }
     }
+  }
+
+  // Iterative extensions
+  const ext = applyExtensions(bestBoard, bestRack, bestPlaced);
+  if (ext.placed > bestPlaced) {
+    bestPlaced = ext.placed; bestBoard = ext.board; bestRack = ext.rack;
   }
 
   if (bestPlaced === 0) return null;
-
-  return {
-    board: bestBoard,
-    newRack: bestRack,
-    tilesPlaced: bestPlaced,
-    hasInitialMeld: true,
-  };
+  return { board: bestBoard, newRack: bestRack, tilesPlaced: bestPlaced, hasInitialMeld: true };
 }
 
 /**
@@ -267,7 +300,6 @@ function findExpertMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMove |
   let bestBoard = board;
   let bestPlaced = 0;
 
-  // Single melds
   for (const m of rackMelds) {
     const remaining = removeTilesFromRack(rack, m);
     const placed = rack.length - remaining.length;
@@ -276,7 +308,6 @@ function findExpertMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMove |
     }
   }
 
-  // Pairs of non-overlapping melds
   for (let i = 0; i < rackMelds.length; i++) {
     const ids1 = new Set(rackMelds[i].map(t => t.id));
     for (let j = i + 1; j < rackMelds.length; j++) {
@@ -288,8 +319,6 @@ function findExpertMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMove |
         bestPlaced = placed; bestRack = remaining;
         bestBoard = [...board, rackMelds[i], rackMelds[j]];
       }
-
-      // Triples
       const ids12 = new Set(combined.map(t => t.id));
       for (let k = j + 1; k < rackMelds.length; k++) {
         if (rackMelds[k].some(t => ids12.has(t.id))) continue;
@@ -304,18 +333,13 @@ function findExpertMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMove |
     }
   }
 
-  // Extensions onto existing board melds
-  const extensions = extendBoardWithRackTile(board, rack);
-  for (const ext of extensions) {
-    const remaining = removeTilesFromRack(rack, ext.usedTiles);
-    const placed = rack.length - remaining.length;
-    if (placed > bestPlaced && isBoardValid(ext.board)) {
-      bestPlaced = placed; bestRack = remaining; bestBoard = ext.board;
-    }
+  // Iterative extensions on top of best new-meld combo
+  const ext = applyExtensions(bestBoard, bestRack, bestPlaced);
+  if (ext.placed > bestPlaced) {
+    bestPlaced = ext.placed; bestBoard = ext.board; bestRack = ext.rack;
   }
 
   if (bestPlaced === 0) return null;
-
   return { board: bestBoard, newRack: bestRack, tilesPlaced: bestPlaced, hasInitialMeld: true };
 }
 
@@ -325,11 +349,25 @@ function findExpertMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMove |
  * Guaranteed to find the maximum number of tiles that can be placed in one turn.
  */
 function findExhaustiveMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMove | null {
+  // Secondary score: penalise jokers sitting at the exposed ends of runs
+  // (a human can steal an end-joker by placing the real tile there).
+  function endJokerPenalty(b: Board): number {
+    let n = 0;
+    for (const meld of b) {
+      if (meld.length < 3) continue;
+      if (meld[0]?.isJoker) n++;
+      if (meld[meld.length - 1]?.isJoker) n++;
+    }
+    return n;
+  }
+
+  let bestScore = -1;
   let bestPlaced = 0;
   let bestBoard = board;
   let bestRack = rack;
 
-  // Recursive search: at each step try adding any non-overlapping meld from rackMelds
+  function score(placed: number, b: Board) { return placed * 1000 - endJokerPenalty(b); }
+
   function search(
     availableMelds: Meld[],
     usedIds: Set<string>,
@@ -337,10 +375,9 @@ function findExhaustiveMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMo
     currentRack: Tile[],
     placed: number
   ) {
-    if (placed > bestPlaced) {
-      bestPlaced = placed;
-      bestBoard = currentBoard;
-      bestRack = currentRack;
+    const s = score(placed, currentBoard);
+    if (s > bestScore) {
+      bestScore = s; bestPlaced = placed; bestBoard = currentBoard; bestRack = currentRack;
     }
     for (let i = 0; i < availableMelds.length; i++) {
       const meld = availableMelds[i];
@@ -359,17 +396,10 @@ function findExhaustiveMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMo
 
   search(rackMelds, new Set<string>(), board, rack, 0);
 
-  // Also try single-tile extensions on top of the best board found
-  const extensions = extendBoardWithRackTile(bestBoard, bestRack);
-  for (const ext of extensions) {
-    if (!isBoardValid(ext.board)) continue;
-    const remaining = removeTilesFromRack(bestRack, ext.usedTiles);
-    const placed = bestPlaced + ext.usedTiles.length;
-    if (placed > bestPlaced) {
-      bestPlaced = placed;
-      bestBoard = ext.board;
-      bestRack = remaining;
-    }
+  // Iterative single-tile extensions on top of the best meld combo
+  const ext = applyExtensions(bestBoard, bestRack, bestPlaced);
+  if (score(ext.placed, ext.board) > bestScore) {
+    bestPlaced = ext.placed; bestBoard = ext.board; bestRack = ext.rack;
   }
 
   if (bestPlaced === 0) return null;

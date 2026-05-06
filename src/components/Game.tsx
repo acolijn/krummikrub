@@ -38,6 +38,7 @@ export function Game() {
   const [activeTile, setActiveTile] = useState<Tile | null>(null);
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [selectedDifficulty, setSelectedDifficulty] = useState<Difficulty>('medium');
+  const [selectedTileIds, setSelectedTileIds] = useState<string[]>([]);
   const aiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isHumanTurn = currentPlayerIndex === 0 && phase === 'playing';
@@ -78,27 +79,10 @@ export function Game() {
     };
   }, [currentPlayerIndex, phase]);
 
-  // ── DnD sensors ─────────────────────────────────────────────────────────
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
-
-  function handleDragStart(event: DragStartEvent) {
-    const id = event.active.id as string;
-    const all = [...(players[0]?.rack ?? []), ...board.flat()];
-    const tile = all.find(t => t.id === id) ?? null;
-    setActiveTile(tile);
-  }
-
-  function handleDragEnd(event: DragEndEvent) {
-    setActiveTile(null);
+  // ── Shared tile-move logic (used by both DnD and click) ─────────────────
+  function applyMove(tileId: string, destinationId: string) {
     if (!isHumanTurn) return;
 
-    const { active, over } = event;
-    if (!over) return;
-
-    const tileId = active.id as string;
-    const overId = over.id as string;
-
-    // Find the tile
     const humanRack = players[0].rack;
     const tileFromRack = humanRack.find(t => t.id === tileId);
     const tileFromBoard = board.flat().find(t => t.id === tileId);
@@ -108,17 +92,14 @@ export function Game() {
     let newBoard: Board = cloneBoard(board);
     let newRack: Tile[] = cloneRack(humanRack);
 
-    // Track source meld index so we can adjust the target index after a split
     const srcMeldIdx = tileFromBoard
       ? board.findIndex(m => m.some(t => t.id === tileId))
       : -1;
     let splitAddedMeld = false;
 
-    // Remove tile from source
     if (tileFromRack) {
       newRack = newRack.filter(t => t.id !== tileId);
     } else if (tileFromBoard) {
-      // Split the source meld at the removed tile's position
       const newMelds: Board = [];
       for (const m of newBoard) {
         const idx = m.findIndex(t => t.id === tileId);
@@ -135,15 +116,12 @@ export function Game() {
       newBoard = newMelds;
     }
 
-    if (overId === 'rack') {
-      // Tile goes back to rack
+    if (destinationId === 'rack') {
       newRack = [...newRack, tile];
-    } else if (overId === 'new-meld') {
-      // Start a brand new meld
+    } else if (destinationId === 'new-meld') {
       newBoard = [...newBoard, [tile]];
-    } else if (overId.startsWith('meld-')) {
-      // Add to existing meld; adjust index if source meld was split
-      let meldIdx = parseInt(overId.replace('meld-', ''), 10);
+    } else if (destinationId.startsWith('meld-')) {
+      let meldIdx = parseInt(destinationId.replace('meld-', ''), 10);
       if (splitAddedMeld && meldIdx > srcMeldIdx) meldIdx++;
       if (meldIdx >= 0 && meldIdx < newBoard.length) {
         newBoard[meldIdx] = sortMeldForDisplay([...newBoard[meldIdx], tile]);
@@ -153,6 +131,98 @@ export function Game() {
     }
 
     setBoard(newBoard, newRack);
+  }
+
+  // ── Multi-tile move (used by click-to-place) ────────────────────────────
+  function applyMoveMultiple(tileIds: string[], destinationId: string) {
+    if (!isHumanTurn || tileIds.length === 0) return;
+
+    const humanRack = players[0].rack;
+    let newBoard: Board = cloneBoard(board);
+    let newRack: Tile[] = cloneRack(humanRack);
+    const tilesToMove: Tile[] = [];
+
+    // Remember destination meld by its tile ids so we can find it after splits
+    let destMeldAnchor: string | null = null;
+    if (destinationId.startsWith('meld-')) {
+      const meldIdx = parseInt(destinationId.replace('meld-', ''), 10);
+      if (meldIdx >= 0 && meldIdx < board.length) {
+        destMeldAnchor = board[meldIdx].find(t => !tileIds.includes(t.id))?.id ?? null;
+      }
+    }
+
+    for (const tileId of tileIds) {
+      const tileFromRack = newRack.find(t => t.id === tileId);
+      const tileFromBoard = !tileFromRack ? newBoard.flat().find(t => t.id === tileId) : null;
+      const tile = tileFromRack ?? tileFromBoard;
+      if (!tile) continue;
+      tilesToMove.push(tile);
+
+      if (tileFromRack) {
+        newRack = newRack.filter(t => t.id !== tileId);
+      } else {
+        const newMelds: Board = [];
+        for (const m of newBoard) {
+          const idx = m.findIndex(t => t.id === tileId);
+          if (idx === -1) { newMelds.push(m); continue; }
+          const left = m.slice(0, idx);
+          const right = m.slice(idx + 1);
+          if (left.length > 0) newMelds.push(left);
+          if (right.length > 0) newMelds.push(right);
+        }
+        newBoard = newMelds;
+      }
+    }
+
+    if (tilesToMove.length === 0) return;
+
+    if (destinationId === 'rack') {
+      newRack = [...newRack, ...tilesToMove];
+    } else if (destinationId === 'new-meld') {
+      newBoard = [...newBoard, sortMeldForDisplay(tilesToMove)];
+    } else if (destMeldAnchor) {
+      const destIdx = newBoard.findIndex(m => m.some(t => t.id === destMeldAnchor));
+      if (destIdx >= 0) {
+        newBoard[destIdx] = sortMeldForDisplay([...newBoard[destIdx], ...tilesToMove]);
+      } else {
+        newBoard = [...newBoard, sortMeldForDisplay(tilesToMove)];
+      }
+    }
+
+    setBoard(newBoard, newRack);
+  }
+
+  // ── Click-to-select / click-to-place ────────────────────────────────────
+  function handleTileClick(tileId: string) {
+    if (!isHumanTurn) return;
+    setSelectedTileIds(prev =>
+      prev.includes(tileId) ? prev.filter(id => id !== tileId) : [...prev, tileId]
+    );
+  }
+
+  function handleZoneClick(zoneId: string) {
+    if (!isHumanTurn || selectedTileIds.length === 0) return;
+    applyMoveMultiple(selectedTileIds, zoneId);
+    setSelectedTileIds([]);
+  }
+
+  // ── DnD sensors ─────────────────────────────────────────────────────────
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
+  function handleDragStart(event: DragStartEvent) {
+    setSelectedTileIds([]); // clear click-selection when dragging starts
+    const id = event.active.id as string;
+    const all = [...(players[0]?.rack ?? []), ...board.flat()];
+    const tile = all.find(t => t.id === id) ?? null;
+    setActiveTile(tile);
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    setActiveTile(null);
+    if (!isHumanTurn) return;
+    const { active, over } = event;
+    if (!over) return;
+    applyMove(active.id as string, over.id as string);
   }
 
   function handleCommit() {
@@ -250,7 +320,14 @@ export function Game() {
         </div>
 
         {/* Board */}
-        <GameBoard board={board} isHumanTurn={isHumanTurn} onFlipJoker={isHumanTurn ? handleFlipJoker : undefined} />
+        <GameBoard
+          board={board}
+          isHumanTurn={isHumanTurn}
+          onFlipJoker={isHumanTurn ? handleFlipJoker : undefined}
+          selectedTileIds={selectedTileIds}
+          onTileClick={handleTileClick}
+          onZoneClick={handleZoneClick}
+        />
 
         {/* Error message */}
         {errorMsg && (
@@ -272,7 +349,13 @@ export function Game() {
                 </span>
               )}
             </div>
-            <PlayerRack rack={human?.rack ?? []} isHumanTurn={isHumanTurn} />
+            <PlayerRack
+              rack={human?.rack ?? []}
+              isHumanTurn={isHumanTurn}
+              selectedTileIds={selectedTileIds}
+              onTileClick={handleTileClick}
+              onRackClick={() => handleZoneClick('rack')}
+            />
           </div>
 
           <button
