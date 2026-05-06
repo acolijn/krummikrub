@@ -1,4 +1,4 @@
-import type { Tile, Meld, Board, Difficulty } from '../types';
+import type { Tile, TileColor, Meld, Board, Difficulty } from '../types';
 import {
   isValidMeld,
   isBoardValid,
@@ -166,8 +166,10 @@ export interface AiMove {
  * Easy:      Only considers single 3-tile melds; picks the first valid one found.
  * Medium:    All single melds + single-tile board extensions; best greedy pick.
  * Expert:    All combos of up to 3 melds + single-tile extensions; best pick.
- * Superhuman: Exhaustive recursive search over ALL non-overlapping meld combos
- *             from the rack, plus single-tile extensions — never misses a play.
+ * Superhuman: Pool-partition solver — combines board + rack into one tile pool
+ *             and finds the partition into valid melds that places the most
+ *             rack tiles. Subsumes every board manipulation (run splits, meld
+ *             merges, multi-tile rearrangements, joker repositioning).
  */
 export function findBestMove(
   rack: Tile[],
@@ -192,9 +194,7 @@ export function findBestMove(
   }
 
   if (difficulty === 'superhuman') {
-    // Use structural meld finder (considers all tiles), then exhaustive combo search
-    const rackMelds = findValidMeldsFromRack(rack);
-    return findExhaustiveMove(rack, board, rackMelds);
+    return findExhaustiveMove(rack, board);
   }
 
   const rackMelds = findValidMeldsFromRack(rack); // max 8 tiles per meld
@@ -208,41 +208,41 @@ export function findBestMove(
 }
 
 /**
- * Find combinations of rack melds that satisfy the initial meld requirement.
+ * Find combinations of rack melds that satisfy the initial meld requirement
+ * (combined score ≥ 30). Searches subsets of up to 5 disjoint melds so the AI
+ * can play e.g. three small groups + a run on its first turn rather than
+ * being forced into the smallest qualifying combo.
  */
 function findInitialMeldCombinations(rack: Tile[], rackMelds: Meld[], board: Board): AiMove[] {
   const results: AiMove[] = [];
+  // High-scoring melds first so we hit ≥30 quickly and surface fat plays early.
+  const sorted = [...rackMelds].sort((a, b) => meldScore(b) - meldScore(a));
+  const MAX_DEPTH = 5;
+  const RESULT_CAP = 500;
 
-  // Try single melds
-  for (const meld of rackMelds) {
-    if (meldScore(meld) >= 30) {
+  function recurse(start: number, picked: Meld[], usedIds: Set<string>, score: number, tiles: number) {
+    if (score >= 30) {
       results.push({
-        board: [...board, meld],
-        newRack: removeTilesFromRack(rack, meld),
-        tilesPlaced: meld.length,
+        board: [...board, ...picked],
+        newRack: removeTilesFromRack(rack, picked.flat()),
+        tilesPlaced: tiles,
         hasInitialMeld: true,
       });
+      if (results.length >= RESULT_CAP) return;
+    }
+    if (picked.length >= MAX_DEPTH) return;
+    for (let i = start; i < sorted.length; i++) {
+      const m = sorted[i];
+      if (m.some(t => usedIds.has(t.id))) continue;
+      const next = new Set(usedIds);
+      m.forEach(t => next.add(t.id));
+      picked.push(m);
+      recurse(i + 1, picked, next, score + meldScore(m), tiles + m.length);
+      picked.pop();
+      if (results.length >= RESULT_CAP) return;
     }
   }
-
-  // Try pairs of melds
-  for (let i = 0; i < rackMelds.length; i++) {
-    for (let j = i + 1; j < rackMelds.length; j++) {
-      const m1 = rackMelds[i];
-      const m2 = rackMelds[j];
-      // Ensure no overlap in tile ids
-      const ids1 = new Set(m1.map(t => t.id));
-      if (m2.some(t => ids1.has(t.id))) continue;
-      if (meldScore(m1) + meldScore(m2) >= 30) {
-        results.push({
-          board: [...board, m1, m2],
-          newRack: removeTilesFromRack(rack, [...m1, ...m2]),
-          tilesPlaced: m1.length + m2.length,
-          hasInitialMeld: true,
-        });
-      }
-    }
-  }
+  recurse(0, [], new Set(), 0, 0);
 
   return results;
 }
@@ -343,213 +343,252 @@ function findExpertMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMove |
   return { board: bestBoard, newRack: bestRack, tilesPlaced: bestPlaced, hasInitialMeld: true };
 }
 
-// ─── Board-manipulation helpers ──────────────────────────────────────────────
+// ─── Pool-partition solver (superhuman) ──────────────────────────────────────
+//
+// The canonical Rummikub move-finding problem: combine all board tiles + rack
+// tiles into a single pool, then search for a partition of the pool into valid
+// melds that
+//   • places every board tile (a board tile can never be discarded), and
+//   • maximises the number of rack tiles placed.
+//
+// This subsumes every ad-hoc board mutation a human would consider — splitting
+// runs, merging melds, repositioning jokers, multi-tile re-arrangements — in
+// one search.
+//
+// Branch-and-bound ordered by canonical tile key. At each node the smallest
+// unassigned tile T is forced to be the canonical-first tile of its meld
+// (smallest color in a group, smallest non-joker number in a run); rack tiles
+// may also be dropped (left on the rack). Jokers sort last so they are only
+// reached after every real tile has been placed or dropped.
 
-/**
- * Try to split `tiles` (the remnant of a meld after removing one tile) into
- * 0, 1, or 2 valid sub-melds.  Returns null when no valid decomposition exists.
- */
-function decomposeIntoValidMelds(tiles: Tile[]): Meld[] | null {
-  if (tiles.length === 0) return [];
-  if (isValidMeld(tiles)) return [tiles];
-  // Try all binary splits into two valid sub-melds (e.g. run split by gap)
-  for (let split = 3; split <= tiles.length - 3; split++) {
-    const left = tiles.slice(0, split);
-    const right = tiles.slice(split);
-    if (isValidMeld(left) && isValidMeld(right)) return [left, right];
-  }
-  return null;
+const COLOR_RANK: Record<TileColor, number> = { red: 0, blue: 1, black: 2, orange: 3 };
+
+interface Slot { tile: Tile; isRack: boolean }
+
+function slotKey(s: Slot): number {
+  return s.tile.isJoker ? 100000 : COLOR_RANK[s.tile.color] * 100 + s.tile.number;
 }
 
-/**
- * Return all (tile, newBoard) pairs where `tile` can be extracted from its
- * board meld and the remainder still forms valid sub-meld(s).
- * Examples:
- *   [4r,4b,4k,4o]  → extract any 4  (leaves valid group-of-3)
- *   [1,2,3,4,5]    → extract 1 or 5 (leaves run-of-4)
- *   [1,2,3,4,5,6,7]→ extract 4      (splits into [1,2,3] + [5,6,7])
- */
-function extractableTiles(board: Board): Array<{ tile: Tile; newBoard: Board }> {
-  const results: Array<{ tile: Tile; newBoard: Board }> = [];
-  const seen = new Set<string>();
-  for (let mi = 0; mi < board.length; mi++) {
-    const meld = board[mi];
-    for (let ti = 0; ti < meld.length; ti++) {
-      const tile = meld[ti];
-      if (seen.has(tile.id)) continue;
-      const remaining = [...meld.slice(0, ti), ...meld.slice(ti + 1)];
-      const subMelds = decomposeIntoValidMelds(remaining);
-      if (subMelds !== null) {
-        results.push({
-          tile,
-          newBoard: [...board.slice(0, mi), ...subMelds, ...board.slice(mi + 1)],
-        });
-        seen.add(tile.id);
-      }
+interface PartitionResult {
+  melds: Meld[];
+  rackIdsPlaced: Set<string>;
+}
+
+function findBestPartition(boardTiles: Tile[], rackTiles: Tile[]): PartitionResult {
+  const slots: Slot[] = [
+    ...boardTiles.map(t => ({ tile: t, isRack: false } as Slot)),
+    ...rackTiles.map(t => ({ tile: t, isRack: true } as Slot)),
+  ];
+  slots.sort((a, b) => slotKey(a) - slotKey(b) || a.tile.id.localeCompare(b.tile.id));
+  const N = slots.length;
+  const inUse = new Array<boolean>(N).fill(true);
+  const allRackIds = new Set(rackTiles.map(t => t.id));
+
+  let bestRackUsed = -1;
+  let bestMelds: Meld[] = [];
+  let bestRackIds = new Set<string>();
+  let nodes = 0;
+  const NODE_LIMIT = 250000;
+
+  function commit(rackUsed: number, melds: Meld[]) {
+    if (rackUsed <= bestRackUsed) return;
+    bestRackUsed = rackUsed;
+    bestMelds = melds.map(m => sortMeldForDisplay([...m]));
+    bestRackIds = new Set();
+    for (const m of bestMelds) for (const t of m) {
+      if (allRackIds.has(t.id)) bestRackIds.add(t.id);
     }
   }
-  return results;
-}
 
-/**
- * Return all (joker, newBoard, usedRackTile) triples where a rack tile can
- * replace a joker in a board meld (the meld stays valid), freeing the joker.
- * E.g. board has [blue9,blue10,blue11,blue12,★(=blue13)], rack has blue13 →
- * place blue13, free the joker.
- */
-function jokerSwaps(
-  board: Board,
-  rack: Tile[]
-): Array<{ joker: Tile; newBoard: Board; usedRackTile: Tile }> {
-  const results: Array<{ joker: Tile; newBoard: Board; usedRackTile: Tile }> = [];
-  const seen = new Set<string>();
-  for (let mi = 0; mi < board.length; mi++) {
-    const meld = board[mi];
-    for (let ji = 0; ji < meld.length; ji++) {
-      const joker = meld[ji];
-      if (!joker.isJoker) continue;
-      for (const rackTile of rack) {
-        if (rackTile.isJoker) continue;
-        const key = `${joker.id}|${rackTile.id}`;
-        if (seen.has(key)) continue;
-        const candidate = [...meld.slice(0, ji), rackTile, ...meld.slice(ji + 1)];
-        if (isValidMeld(candidate)) {
-          const sorted = sortMeldForDisplay(candidate);
-          const newBoard = board.map((m, i) => (i === mi ? sorted : m));
-          results.push({ joker, newBoard, usedRackTile: rackTile });
-          seen.add(key);
+  function nextActive(from: number): number {
+    let i = from;
+    while (i < N && !inUse[i]) i++;
+    return i;
+  }
+
+  function remainingRackCount(from: number): number {
+    let c = 0;
+    for (let i = from; i < N; i++) if (inUse[i] && slots[i].isRack) c++;
+    return c;
+  }
+
+  // Groups whose canonical-first (smallest non-joker) tile is slots[idx].
+  // Other tiles must share number AND have higher color rank, OR be jokers.
+  function enumGroups(idx: number): number[][] {
+    const s = slots[idx];
+    const num = s.tile.number;
+    const myRank = COLOR_RANK[s.tile.color];
+    const cands: number[] = [];
+    for (let j = idx + 1; j < N; j++) {
+      if (!inUse[j]) continue;
+      const t = slots[j].tile;
+      if (t.isJoker) cands.push(j);
+      else if (t.number === num && COLOR_RANK[t.color] > myRank) cands.push(j);
+    }
+    const out: number[][] = [];
+    const usedCols = new Set<TileColor>([s.tile.color]);
+    const picked: number[] = [];
+    function pick(start: number) {
+      if (picked.length >= 2) out.push([idx, ...picked]);
+      if (picked.length === 3) return;
+      for (let i = start; i < cands.length; i++) {
+        const j = cands[i];
+        const t = slots[j].tile;
+        if (!t.isJoker) {
+          if (usedCols.has(t.color)) continue;
+          usedCols.add(t.color);
         }
+        picked.push(j);
+        pick(i + 1);
+        picked.pop();
+        if (!t.isJoker) usedCols.delete(t.color);
       }
     }
+    pick(0);
+    return out;
   }
-  return results;
+
+  // Runs whose canonical-first (smallest non-joker) tile is slots[idx].
+  // Run start may be ≤ s.number when leading positions are filled by jokers.
+  function enumRuns(idx: number): number[][] {
+    const s = slots[idx];
+    const sNum = s.tile.number;
+    const color = s.tile.color;
+
+    const realByNum = new Map<number, number[]>();
+    const jokerIdxs: number[] = [];
+    for (let j = idx + 1; j < N; j++) {
+      if (!inUse[j]) continue;
+      const t = slots[j].tile;
+      if (t.isJoker) jokerIdxs.push(j);
+      else if (t.color === color) {
+        const list = realByNum.get(t.number) ?? [];
+        list.push(j);
+        realByNum.set(t.number, list);
+      }
+    }
+
+    const out: number[][] = [];
+    const positionIdxs: number[] = [];
+    const usedReal = new Set<number>();
+
+    function buildPos(pos: number, end: number, jokersUsed: number) {
+      if (pos > end) {
+        out.push([...positionIdxs]);
+        return;
+      }
+      if (pos === sNum) {
+        positionIdxs.push(idx);
+        buildPos(pos + 1, end, jokersUsed);
+        positionIdxs.pop();
+        return;
+      }
+      const reals = realByNum.get(pos) ?? [];
+      for (const r of reals) {
+        if (usedReal.has(r)) continue;
+        usedReal.add(r);
+        positionIdxs.push(r);
+        buildPos(pos + 1, end, jokersUsed);
+        positionIdxs.pop();
+        usedReal.delete(r);
+      }
+      if (jokersUsed < jokerIdxs.length) {
+        const j = jokerIdxs[jokersUsed];
+        positionIdxs.push(j);
+        buildPos(pos + 1, end, jokersUsed + 1);
+        positionIdxs.pop();
+      }
+    }
+
+    const minStart = Math.max(1, sNum - jokerIdxs.length);
+    for (let start = minStart; start <= sNum; start++) {
+      const lowJokers = sNum - start;
+      if (lowJokers > jokerIdxs.length) continue;
+      // Pre-place leading jokers (positions start..sNum-1)
+      for (let i = 0; i < lowJokers; i++) positionIdxs.push(jokerIdxs[i]);
+      for (let end = sNum + 2; end <= 13; end++) {
+        if (end - start + 1 < 3) continue;
+        buildPos(sNum, end, lowJokers);
+      }
+      for (let i = 0; i < lowJokers; i++) positionIdxs.pop();
+    }
+
+    return out;
+  }
+
+  function recurse(rackUsed: number, melds: Meld[]) {
+    if (++nodes > NODE_LIMIT) return;
+
+    const i = nextActive(0);
+    if (i >= N) {
+      commit(rackUsed, melds);
+      return;
+    }
+
+    // Upper-bound prune: can't beat current best even if every remaining rack
+    // tile gets placed.
+    if (rackUsed + remainingRackCount(i) <= bestRackUsed) return;
+
+    const s = slots[i];
+
+    if (s.tile.isJoker) {
+      // We've reached the joker tail. Any remaining mandatory (board) joker
+      // means this branch failed — board tiles must always end up in a meld.
+      // Otherwise drop all remaining (rack) jokers and commit.
+      for (let j = i; j < N; j++) {
+        if (inUse[j] && !slots[j].isRack) return;
+      }
+      commit(rackUsed, melds);
+      return;
+    }
+
+    // Place s in a meld first (tighter bound earlier); drop only as fallback.
+    for (const idxs of enumGroups(i)) {
+      let used = 0;
+      for (const j of idxs) {
+        inUse[j] = false;
+        if (slots[j].isRack) used++;
+      }
+      melds.push(idxs.map(j => slots[j].tile));
+      recurse(rackUsed + used, melds);
+      melds.pop();
+      for (const j of idxs) inUse[j] = true;
+    }
+
+    for (const idxs of enumRuns(i)) {
+      let used = 0;
+      for (const j of idxs) {
+        inUse[j] = false;
+        if (slots[j].isRack) used++;
+      }
+      melds.push(idxs.map(j => slots[j].tile));
+      recurse(rackUsed + used, melds);
+      melds.pop();
+      for (const j of idxs) inUse[j] = true;
+    }
+
+    if (s.isRack) {
+      inUse[i] = false;
+      recurse(rackUsed, melds);
+      inUse[i] = true;
+    }
+  }
+
+  recurse(0, []);
+
+  return { melds: bestMelds, rackIdsPlaced: bestRackIds };
 }
 
-/**
- * Superhuman: exhaustive search with full board manipulation.
- *
- * Tries three classes of "pre-board mutation" before the main rack search:
- *   • None         — search directly from the original board + rack
- *   • Extension    — add one rack tile to an existing meld end, then search
- *   • Joker swap   — replace a board joker with its real tile from the rack,
- *                    add the freed joker to the virtual rack, then search
- *
- * For each of those starting states it also runs an extract-then-meld search
- * (Phase 2) that pulls one board tile out of a meld and uses it in new combos.
- */
-function findExhaustiveMove(rack: Tile[], board: Board, _rackMelds: Meld[]): AiMove | null {
-  function endJokerPenalty(b: Board): number {
-    let n = 0;
-    for (const meld of b) {
-      if (meld.length < 3) continue;
-      if (meld[0]?.isJoker) n++;
-      if (meld[meld.length - 1]?.isJoker) n++;
-    }
-    return n;
-  }
-  function scoreFn(placed: number, b: Board) { return placed * 1000 - endJokerPenalty(b); }
-
-  let bestScore = -1;
-  let bestPlaced = 0;
-  let bestBoard = board;
-  let bestRack = rack;
-
-  function commitIfBetter(placed: number, b: Board, r: Tile[]) {
-    const s = scoreFn(placed, b);
-    if (s > bestScore) {
-      bestScore = s; bestPlaced = placed; bestBoard = b; bestRack = r;
-    }
-  }
-
-  /** Exhaustive rack-combo search + iterative extensions from a given state. */
-  function runSearch(startRack: Tile[], startBoard: Board, prePlaced: number) {
-    const melds = findValidMeldsFromRack(startRack);
-    let sBest = 0;
-    let sBestBoard = startBoard;
-    let sBestRack = startRack;
-
-    const search = (available: Meld[], usedIds: Set<string>, curBoard: Board, placed: number) => {
-      if (placed > sBest) {
-        sBest = placed; sBestBoard = curBoard;
-        sBestRack = startRack.filter(t => !usedIds.has(t.id));
-      }
-      for (let i = 0; i < available.length; i++) {
-        const meld = available[i];
-        if (meld.some(t => usedIds.has(t.id))) continue;
-        const newUsed = new Set(usedIds);
-        meld.forEach(t => newUsed.add(t.id));
-        search(available.slice(i + 1), newUsed, [...curBoard, meld], placed + meld.length);
-      }
-    };
-
-    search(melds, new Set<string>(), startBoard, 0);
-
-    const ext = applyExtensions(sBestBoard, sBestRack, sBest);
-    if (ext.placed > sBest) { sBest = ext.placed; sBestBoard = ext.board; sBestRack = ext.rack; }
-    if (sBest > 0) commitIfBetter(prePlaced + sBest, sBestBoard, sBestRack);
-  }
-
-  /** Extract one tile from the pre-board, form new melds using it + preRack. */
-  function runExtractSearch(preBoard: Board, preRack: Tile[], prePlaced: number) {
-    const preRackIds = new Set(preRack.map(t => t.id));
-    for (const { tile: boardTile, newBoard: extractedBoard } of extractableTiles(preBoard)) {
-      const extRack = [...preRack, boardTile];
-      const extMelds = findValidMeldsFromRack(extRack);
-      const anchors = extMelds.filter(m => m.some(t => t.id === boardTile.id));
-      if (anchors.length === 0) continue;
-
-      let p2Best = 0;
-      let p2Board = extractedBoard;
-      let p2Rack = preRack;
-
-      for (const anchorMeld of anchors) {
-        if (anchorMeld.filter(t => preRackIds.has(t.id)).length === 0) continue;
-        const usedAfter = new Set(anchorMeld.map(t => t.id));
-        const anchorBoard = [...extractedBoard, anchorMeld];
-        const remaining = extMelds.filter(m => !m.some(t => usedAfter.has(t.id)));
-
-        const sub = (available: Meld[], usedIds: Set<string>, curBoard: Board, placed: number) => {
-          if (placed > p2Best) {
-            p2Best = placed; p2Board = curBoard;
-            p2Rack = preRack.filter(t => !usedIds.has(t.id));
-          }
-          for (let i = 0; i < available.length; i++) {
-            const m = available[i];
-            if (m.some(t => usedIds.has(t.id))) continue;
-            const newUsed = new Set(usedIds);
-            m.forEach(t => newUsed.add(t.id));
-            sub(available.slice(i + 1), newUsed, [...curBoard, m], placed + m.length);
-          }
-        };
-        sub(remaining, usedAfter, anchorBoard, anchorMeld.filter(t => preRackIds.has(t.id)).length);
-      }
-
-      if (p2Best > 0) {
-        const ext2 = applyExtensions(p2Board, p2Rack, p2Best);
-        commitIfBetter(prePlaced + ext2.placed, ext2.board, ext2.rack);
-      }
-    }
-  }
-
-  // ── Original state ────────────────────────────────────────────────────────
-  runSearch(rack, board, 0);
-  runExtractSearch(board, rack, 0);
-
-  // ── Extension mutations: add one rack tile to an existing meld end ────────
-  for (const ext of extendBoardWithRackTile(board, rack)) {
-    if (!isBoardValid(ext.board)) continue;
-    const preRack = removeTilesFromRack(rack, ext.usedTiles);
-    runSearch(preRack, ext.board, ext.usedTiles.length);
-    runExtractSearch(ext.board, preRack, ext.usedTiles.length);
-  }
-
-  // ── Joker-swap mutations: place real tile, free joker for new melds ───────
-  for (const { joker, newBoard: swapBoard, usedRackTile } of jokerSwaps(board, rack)) {
-    const preRack = [...removeTilesFromRack(rack, [usedRackTile]), joker];
-    runSearch(preRack, swapBoard, 1);
-    runExtractSearch(swapBoard, preRack, 1);
-  }
-
-  if (bestPlaced === 0) return null;
-  return { board: bestBoard, newRack: bestRack, tilesPlaced: bestPlaced, hasInitialMeld: true };
+function findExhaustiveMove(rack: Tile[], board: Board): AiMove | null {
+  const result = findBestPartition(board.flat(), rack);
+  if (result.rackIdsPlaced.size === 0) return null;
+  // Sanity check — partition must rebuild a valid board.
+  if (!isBoardValid(result.melds)) return null;
+  const newRack = rack.filter(t => !result.rackIdsPlaced.has(t.id));
+  return {
+    board: result.melds,
+    newRack,
+    tilesPlaced: result.rackIdsPlaced.size,
+    hasInitialMeld: true,
+  };
 }
