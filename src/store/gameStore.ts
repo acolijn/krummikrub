@@ -114,6 +114,19 @@ export const useGameStore = create<GameStore>((set, get) => ({
       return { ok: false, reason: 'Board is not valid. Turn reverted.' };
     }
 
+    // Tiles that were on the board at turn start must still be on the board.
+    // Rearranging is fine; pulling a board tile back to the rack is not.
+    const finalBoardIds = new Set(state.board.flat().map(t => t.id));
+    const missing = snapshot.board.flat().filter(t => !finalBoardIds.has(t.id));
+    if (missing.length > 0) {
+      set(s => {
+        const players = [...s.players];
+        players[0] = { ...players[0], rack: cloneRack(snapshot.rack) };
+        return { board: cloneBoard(snapshot.board), players };
+      });
+      return { ok: false, reason: 'Tiles already on the board cannot be moved back to your rack.' };
+    }
+
     // Check initial meld requirement
     const tilesPlayedIds = new Set(human.rack.map(r => r.id));
     const tilesPlayedCheck = snapshot.rack.filter(t => !tilesPlayedIds.has(t.id));

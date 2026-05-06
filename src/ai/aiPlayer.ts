@@ -388,7 +388,13 @@ function findBestPartition(boardTiles: Tile[], rackTiles: Tile[]): PartitionResu
   let bestMelds: Meld[] = [];
   let bestRackIds = new Set<string>();
   let nodes = 0;
-  const NODE_LIMIT = 250000;
+  const NODE_LIMIT = 1500000;
+
+  function rackCountIn(idxs: number[]): number {
+    let c = 0;
+    for (const j of idxs) if (slots[j].isRack) c++;
+    return c;
+  }
 
   function commit(rackUsed: number, melds: Meld[]) {
     if (rackUsed <= bestRackUsed) return;
@@ -542,20 +548,12 @@ function findBestPartition(boardTiles: Tile[], rackTiles: Tile[]): PartitionResu
       return;
     }
 
-    // Place s in a meld first (tighter bound earlier); drop only as fallback.
-    for (const idxs of enumGroups(i)) {
-      let used = 0;
-      for (const j of idxs) {
-        inUse[j] = false;
-        if (slots[j].isRack) used++;
-      }
-      melds.push(idxs.map(j => slots[j].tile));
-      recurse(rackUsed + used, melds);
-      melds.pop();
-      for (const j of idxs) inUse[j] = true;
-    }
-
-    for (const idxs of enumRuns(i)) {
+    // Place s in a meld first; sort candidates by rack-tile count desc so
+    // high-yield branches surface earlier and the bound prunes more aggressively.
+    // Drop is the last resort (only valid for rack tiles).
+    const candidates: number[][] = [...enumGroups(i), ...enumRuns(i)];
+    candidates.sort((a, b) => rackCountIn(b) - rackCountIn(a));
+    for (const idxs of candidates) {
       let used = 0;
       for (const j of idxs) {
         inUse[j] = false;
