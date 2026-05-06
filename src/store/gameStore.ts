@@ -76,6 +76,19 @@ export const useGameStore = create<GameStore>((set, get) => ({
     const human = state.players[0];
     const snapshot = state.turnSnapshot!;
 
+    // Tiles that were on the board at turn start must still be on the board.
+    // Checked first so the "no tiles played → draw" branch can't bypass it.
+    const finalBoardIds = new Set(state.board.flat().map(t => t.id));
+    const missing = snapshot.board.flat().filter(t => !finalBoardIds.has(t.id));
+    if (missing.length > 0) {
+      set(s => {
+        const players = [...s.players];
+        players[0] = { ...players[0], rack: cloneRack(snapshot.rack) };
+        return { board: cloneBoard(snapshot.board), players };
+      });
+      return { ok: false, reason: 'Tiles already on the board cannot be moved back to your rack.' };
+    }
+
     // If no tiles were played (rack unchanged, board unchanged), force a draw
     const tilesPlayed = snapshot.rack.filter(t => !human.rack.some(r => r.id === t.id));
     if (tilesPlayed.length === 0) {
@@ -112,19 +125,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
         });
       }
       return { ok: false, reason: 'Board is not valid. Turn reverted.' };
-    }
-
-    // Tiles that were on the board at turn start must still be on the board.
-    // Rearranging is fine; pulling a board tile back to the rack is not.
-    const finalBoardIds = new Set(state.board.flat().map(t => t.id));
-    const missing = snapshot.board.flat().filter(t => !finalBoardIds.has(t.id));
-    if (missing.length > 0) {
-      set(s => {
-        const players = [...s.players];
-        players[0] = { ...players[0], rack: cloneRack(snapshot.rack) };
-        return { board: cloneBoard(snapshot.board), players };
-      });
-      return { ok: false, reason: 'Tiles already on the board cannot be moved back to your rack.' };
     }
 
     // Check initial meld requirement
