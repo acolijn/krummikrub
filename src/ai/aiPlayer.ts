@@ -392,20 +392,23 @@ function extractableTiles(board: Board): Array<{ tile: Tile; newBoard: Board }> 
 }
 
 /**
- * Superhuman: exhaustive recursive backtracking over ALL non-overlapping
- * combinations of valid rack melds, plus single-tile board extensions.
+ * Superhuman: exhaustive search with board manipulation.
  *
- * Phase 1 — rack tiles only: guaranteed to find the maximum rack tiles placeable
- *           from the rack alone.
- * Phase 2 — board manipulation: for every tile that can be extracted from an
- *           existing board meld while keeping the board valid, treat it as an
- *           extra tile and re-run the exhaustive search.  This lets the AI do
- *           moves like "take the 4 from a group-of-four 4s, combine it with 2+3
- *           from my rack to form a run [2,3,4]".
+ * Phase 1 — rack tiles only: find all non-overlapping meld combos, then
+ *           apply iterative single-tile extensions.
+ *
+ * Phase 2 — extend-then-extract: seed from the original board AND from every
+ *           board reachable by one single-tile rack→board extension.  For each
+ *           seeded board, try extracting every extractable tile and forming new
+ *           melds from it combined with the remaining rack tiles.
+ *
+ *   Example: board=[4b,4r,4k], rack=[4o,5b,6b]
+ *     → extend with 4o → [4b,4r,4k,4o]  (preBoard)
+ *     → extract 4b     → [4r,4k,4o]      (valid group-of-3 remains)
+ *     → form [4b,5b,6b] from extracted 4b + rack tiles 5b,6b
+ *     → 3 rack tiles placed instead of 0
  */
 function findExhaustiveMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMove | null {
-  const rackIds = new Set(rack.map(t => t.id));
-
   function endJokerPenalty(b: Board): number {
     let n = 0;
     for (const meld of b) {
@@ -422,10 +425,10 @@ function findExhaustiveMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMo
   let bestBoard = board;
   let bestRack = rack;
 
-  function commitIfBetter(ext: { board: Board; rack: Tile[]; placed: number }) {
-    const s = scoreFn(ext.placed, ext.board);
+  function commitIfBetter(placed: number, b: Board, r: Tile[]) {
+    const s = scoreFn(placed, b);
     if (s > bestScore) {
-      bestScore = s; bestPlaced = ext.placed; bestBoard = ext.board; bestRack = ext.rack;
+      bestScore = s; bestPlaced = placed; bestBoard = b; bestRack = r;
     }
   }
 
@@ -457,58 +460,81 @@ function findExhaustiveMove(rack: Tile[], board: Board, rackMelds: Meld[]): AiMo
   search(rackMelds, new Set<string>(), board, 0);
 
   if (p1BestPlaced > 0) {
-    commitIfBetter(applyExtensions(p1BestBoard, p1BestRack, p1BestPlaced));
+    const ext = applyExtensions(p1BestBoard, p1BestRack, p1BestPlaced);
+    commitIfBetter(ext.placed, ext.board, ext.rack);
   }
 
-  // ── Phase 2: board manipulation (extract one tile, combine with rack) ─────
-  for (const { tile: boardTile, newBoard: extractedBoard } of extractableTiles(board)) {
-    // Build an extended meld set that includes the extracted board tile
-    const extRack = [...rack, boardTile];
-    const extMelds = findValidMeldsFromRack(extRack);
-    // Only anchor melds that actually consume the extracted tile
-    const anchors = extMelds.filter(m => m.some(t => t.id === boardTile.id));
-    if (anchors.length === 0) continue;
-
-    let p2BestPlaced = 0;
-    let p2BestBoard = extractedBoard;
-    let p2BestRack = rack;
-
-    for (const anchorMeld of anchors) {
-      // The move must contribute at least one tile FROM THE RACK
-      const rackInAnchor = anchorMeld.filter(t => rackIds.has(t.id)).length;
-      if (rackInAnchor === 0) continue;
-
-      const usedAfterAnchor = new Set(anchorMeld.map(t => t.id));
-      const anchorBoard = [...extractedBoard, anchorMeld];
-      // Remaining melds (boardTile already consumed — all tiles here are rack tiles)
-      const remainingMelds = extMelds.filter(m => !m.some(t => usedAfterAnchor.has(t.id)));
-
-      const subSearch = (
-        available: Meld[],
-        usedIds: Set<string>,
-        curBoard: Board,
-        rackPlaced: number
-      ) => {
-        if (rackPlaced > p2BestPlaced) {
-          p2BestPlaced = rackPlaced;
-          p2BestBoard = curBoard;
-          p2BestRack = rack.filter(t => !usedIds.has(t.id));
-        }
-        for (let i = 0; i < available.length; i++) {
-          const m = available[i];
-          if (m.some(t => usedIds.has(t.id))) continue;
-          const newUsed = new Set(usedIds);
-          m.forEach(t => newUsed.add(t.id));
-          // All tiles in remainingMelds are rack tiles (boardTile was filtered out)
-          subSearch(available.slice(i + 1), newUsed, [...curBoard, m], rackPlaced + m.length);
-        }
-      };
-
-      subSearch(remainingMelds, usedAfterAnchor, anchorBoard, rackInAnchor);
+  // ── Phase 2: extend-then-extract ─────────────────────────────────────────
+  // Build pre-board candidates: original board (prePlaced=0), and boards
+  // after each valid single-tile rack→board extension (prePlaced=1).
+  // This lets Phase 2 find "add tile A to extend a meld, then extract tile B
+  // from the now-larger meld, then form new melds with B + remaining rack".
+  const preBoardCandidates: Array<{ preBoard: Board; preRack: Tile[]; prePlaced: number }> = [
+    { preBoard: board, preRack: rack, prePlaced: 0 },
+  ];
+  for (const ext of extendBoardWithRackTile(board, rack)) {
+    if (isBoardValid(ext.board)) {
+      preBoardCandidates.push({
+        preBoard: ext.board,
+        preRack: removeTilesFromRack(rack, ext.usedTiles),
+        prePlaced: ext.usedTiles.length,
+      });
     }
+  }
 
-    if (p2BestPlaced > 0) {
-      commitIfBetter(applyExtensions(p2BestBoard, p2BestRack, p2BestPlaced));
+  for (const { preBoard, preRack, prePlaced } of preBoardCandidates) {
+    const preRackIds = new Set(preRack.map(t => t.id));
+
+    for (const { tile: boardTile, newBoard: extractedBoard } of extractableTiles(preBoard)) {
+      const extRack = [...preRack, boardTile];
+      const extMelds = findValidMeldsFromRack(extRack);
+      const anchors = extMelds.filter(m => m.some(t => t.id === boardTile.id));
+      if (anchors.length === 0) continue;
+
+      let p2BestPlaced = 0;
+      let p2BestBoard = extractedBoard;
+      let p2BestRack = preRack;
+
+      for (const anchorMeld of anchors) {
+        // Anchor must consume at least one tile from the (pre-)rack
+        const rackInAnchor = anchorMeld.filter(t => preRackIds.has(t.id)).length;
+        if (rackInAnchor === 0) continue;
+
+        const usedAfterAnchor = new Set(anchorMeld.map(t => t.id));
+        const anchorBoard = [...extractedBoard, anchorMeld];
+        const remainingMelds = extMelds.filter(m => !m.some(t => usedAfterAnchor.has(t.id)));
+
+        const subSearch = (
+          available: Meld[],
+          usedIds: Set<string>,
+          curBoard: Board,
+          rackPlaced: number
+        ) => {
+          if (rackPlaced > p2BestPlaced) {
+            p2BestPlaced = rackPlaced;
+            p2BestBoard = curBoard;
+            p2BestRack = preRack.filter(t => !usedIds.has(t.id));
+          }
+          for (let i = 0; i < available.length; i++) {
+            const m = available[i];
+            if (m.some(t => usedIds.has(t.id))) continue;
+            const newUsed = new Set(usedIds);
+            m.forEach(t => newUsed.add(t.id));
+            subSearch(available.slice(i + 1), newUsed, [...curBoard, m], rackPlaced + m.length);
+          }
+        };
+
+        subSearch(remainingMelds, usedAfterAnchor, anchorBoard, rackInAnchor);
+      }
+
+      if (p2BestPlaced > 0) {
+        // totalPlaced = pre-extension tile(s) + Phase-2 rack tiles
+        const totalPlaced = prePlaced + p2BestPlaced;
+        // p2BestRack is a subset of preRack (= original rack − extension tiles),
+        // so it correctly represents the original rack tiles still remaining.
+        const ext2 = applyExtensions(p2BestBoard, p2BestRack, totalPlaced);
+        commitIfBetter(ext2.placed, ext2.board, ext2.rack);
+      }
     }
   }
 
