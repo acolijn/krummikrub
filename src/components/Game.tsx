@@ -89,7 +89,25 @@ export function Game() {
       const player = players[currentPlayerIndex];
       const move = findBestMove(player.rack, board, player.hasInitialMeld, store.difficulty);
 
+      // Distinct color prefixes (b = blue, k = black) to avoid ambiguity in logs.
+      const colorChar = (c: string) => c === 'black' ? 'k' : c[0];
+      const fmtTile = (x: { isJoker: boolean; color: string; number: number }) =>
+        x.isJoker ? 'J' : `${colorChar(x.color)}${x.number}`;
+      const fmtBoard = (b: typeof board) => b.map(m => m.map(fmtTile).join('-'));
+
       if (move) {
+        if (import.meta.env.DEV) {
+          console.info('[AI move]', {
+            difficulty: store.difficulty,
+            player: player.name,
+            hasInitialMeld: player.hasInitialMeld,
+            rackBefore: player.rack.map(fmtTile),
+            rackAfter: move.newRack.map(fmtTile),
+            boardBefore: fmtBoard(board),
+            boardAfter: fmtBoard(move.board),
+            tilesPlaced: move.tilesPlaced,
+          });
+        }
         commitAiTurn(move.board, move.newRack, move.hasInitialMeld);
       } else {
         // Diagnostic: capture state when AI passes so we can inspect "why didn't it play?"
@@ -98,8 +116,8 @@ export function Game() {
             difficulty: store.difficulty,
             player: player.name,
             hasInitialMeld: player.hasInitialMeld,
-            rack: player.rack.map(x => x.isJoker ? 'J' : `${x.color[0]}${x.number}`),
-            board: board.map(m => m.map(x => x.isJoker ? 'J' : `${x.color[0]}${x.number}`).join('-')),
+            rack: player.rack.map(fmtTile),
+            board: fmtBoard(board),
           });
         }
         // Draw a tile

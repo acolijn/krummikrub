@@ -150,6 +150,77 @@ function applyExtensions(
   return cur;
 }
 
+// ─── Free joker liberation ───────────────────────────────────────────────────
+//
+// A "free" joker is one whose board meld stays a valid meld after removing it
+// (e.g. the joker in a 4-tile group {5,5,5,★} — drop it and {5,5,5} is still
+// a valid group). Greedy-style solvers don't manipulate the board, so without
+// help they never retrieve such jokers. We pre-extract free jokers, hand them
+// to the solver as bonus rack tiles, then restore any unused ones to their
+// original meld in the result.
+
+interface FreeJoker {
+  meldIdx: number;
+  jokerIdx: number;
+  tile: Tile;
+}
+
+function findFreeJokers(board: Board): FreeJoker[] {
+  const out: FreeJoker[] = [];
+  for (let mi = 0; mi < board.length; mi++) {
+    const meld = board[mi];
+    for (let ji = 0; ji < meld.length; ji++) {
+      if (!meld[ji].isJoker) continue;
+      const without = meld.filter((_, k) => k !== ji);
+      if (isValidMeld(without)) {
+        out.push({ meldIdx: mi, jokerIdx: ji, tile: meld[ji] });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+type GreedySolver = (rack: Tile[], board: Board, rackMelds: Meld[]) => AiMove | null;
+
+function solveWithLiberatedJokers(rack: Tile[], board: Board, solve: GreedySolver): AiMove | null {
+  const baseline = solve(rack, board, findValidMeldsFromRack(rack));
+  const freeJokers = findFreeJokers(board);
+  if (freeJokers.length === 0) return baseline;
+
+  const augmentedRack = [...rack, ...freeJokers.map(f => f.tile)];
+  const shrunkBoard: Board = board.map((meld, mi) => {
+    const f = freeJokers.find(x => x.meldIdx === mi);
+    return f ? meld.filter((_, ji) => ji !== f.jokerIdx) : meld;
+  });
+  const aug = solve(augmentedRack, shrunkBoard, findValidMeldsFromRack(augmentedRack));
+  if (!aug) return baseline;
+
+  const jokerIds = new Set(freeJokers.map(f => f.tile.id));
+  const newRackIds = new Set(aug.newRack.map(t => t.id));
+  const unused = freeJokers.filter(f => newRackIds.has(f.tile.id));
+
+  // Restore unused jokers to their origin meld — only safe when the meld is
+  // unmodified (no extensions added). Otherwise abort and keep the baseline,
+  // since we can't claim a joker we didn't actually use.
+  for (const f of unused) {
+    const target = aug.board[f.meldIdx];
+    const originalIds = board[f.meldIdx].filter((_, k) => k !== f.jokerIdx).map(t => t.id);
+    const targetIds = new Set(target.map(t => t.id));
+    if (originalIds.length !== targetIds.size || !originalIds.every(id => targetIds.has(id))) {
+      return baseline;
+    }
+    aug.board[f.meldIdx] = sortMeldForDisplay([...target, f.tile]);
+  }
+
+  aug.newRack = aug.newRack.filter(t => !jokerIds.has(t.id));
+  aug.tilesPlaced -= (freeJokers.length - unused.length);
+
+  if (aug.tilesPlaced === 0) return baseline;
+  if (!baseline || aug.tilesPlaced > baseline.tilesPlaced) return aug;
+  return baseline;
+}
+
 // ─── Greedy AI move finder ────────────────────────────────────────────────────
 
 export interface AiMove {
@@ -208,14 +279,12 @@ export function findBestMove(
     return findExhaustiveMove(rack, board);
   }
 
-  const rackMelds = findValidMeldsFromRack(rack); // max 8 tiles per meld
-
   if (difficulty === 'expert') {
-    return findExpertMove(rack, board, rackMelds);
+    return solveWithLiberatedJokers(rack, board, findExpertMove);
   }
 
   // medium
-  return findGreedyMove(rack, board, rackMelds);
+  return solveWithLiberatedJokers(rack, board, findGreedyMove);
 }
 
 /**
