@@ -62,7 +62,7 @@ src/
 
 The repo ships a multi-stage [Dockerfile](Dockerfile) (`node:22-alpine`
 build → `nginx:1.27-alpine` serve) and a [docker-compose.yml](docker-compose.yml)
-that binds the container's port 80 to the host's `127.0.0.1:8080`. The
+that binds the container's port 80 to the host's `127.0.0.1:5173`. The
 intended layout: docker container serves the SPA on a localhost-only port,
 the host's existing nginx reverse-proxies your public domain to it (TLS
 terminated at the host, certbot handles certs).
