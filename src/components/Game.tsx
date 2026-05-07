@@ -18,6 +18,7 @@ import { Scoreboard } from './Scoreboard';
 import type { Tile, Board, Difficulty } from '../types';
 import { cloneBoard, cloneRack, sortMeldForDisplay } from '../game/logic';
 import { loadNames, saveNames, loadScores, type PlayerNames } from '../store/persistence';
+import { fetchGameCount, incrementGameCount } from '../api/counter';
 
 export function Game() {
   const store = useGameStore();
@@ -44,6 +45,26 @@ export function Game() {
   const [names, setNames] = useState<PlayerNames>(() => loadNames());
   const [scores, setScores] = useState(() => loadScores());
   const [exitConfirm, setExitConfirm] = useState(false);
+  const [gameCount, setGameCount] = useState<number | null>(null);
+  const incrementedForPhase = useRef(false);
+
+  // Fetch counter on initial mount + whenever we return to setup.
+  useEffect(() => {
+    if (phase === 'setup') {
+      fetchGameCount().then(setGameCount);
+    }
+  }, [phase]);
+
+  // Increment exactly once per game when phase flips to 'ended'.
+  useEffect(() => {
+    if (phase === 'ended' && !incrementedForPhase.current) {
+      incrementedForPhase.current = true;
+      incrementGameCount().then(n => { if (n !== null) setGameCount(n); });
+    }
+    if (phase !== 'ended') {
+      incrementedForPhase.current = false;
+    }
+  }, [phase]);
 
   function handleExit() {
     if (!exitConfirm) { setExitConfirm(true); return; }
@@ -293,6 +314,11 @@ export function Game() {
     return (
       <div className="flex flex-col items-center justify-start min-h-screen gap-6 py-8 px-4">
         <h1 className="text-5xl font-bold text-white tracking-tight">KrummiKrub</h1>
+        {gameCount !== null && (
+          <div className="text-xs text-gray-500">
+            Games finished worldwide: <span className="font-mono text-gray-300">{gameCount.toLocaleString()}</span>
+          </div>
+        )}
 
         <div className="flex flex-col gap-2 w-72">
           <h2 className="text-sm font-semibold text-gray-300">Players</h2>

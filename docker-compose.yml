@@ -12,3 +12,16 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:5173:80"
+
+  krummikrub-api:
+    build: ./api
+    image: krummikrub-api:latest
+    container_name: krummikrub-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5174:80"
+    volumes:
+      - counter-data:/data
+
+volumes:
+  counter-data:
