@@ -43,6 +43,16 @@ export function Game() {
   const [selectedTileIds, setSelectedTileIds] = useState<string[]>([]);
   const [names, setNames] = useState<PlayerNames>(() => loadNames());
   const [scores, setScores] = useState(() => loadScores());
+  const [exitConfirm, setExitConfirm] = useState(false);
+
+  function handleExit() {
+    if (!exitConfirm) { setExitConfirm(true); return; }
+    setExitConfirm(false);
+    if (aiTimeoutRef.current) clearTimeout(aiTimeoutRef.current);
+    setSelectedTileIds([]);
+    setErrorMsg('');
+    useGameStore.setState({ phase: 'setup' });
+  }
   const aiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isHumanTurn = currentPlayerIndex === 0 && phase === 'playing';
@@ -366,9 +376,20 @@ export function Game() {
         </div>
 
         {/* Status bar */}
-        <div className="flex items-center justify-between px-3 py-1 bg-gray-900 rounded-lg text-sm">
-          <span className="text-gray-300">{message}</span>
+        <div className="flex items-center justify-between gap-3 px-3 py-1 bg-gray-900 rounded-lg text-sm">
+          <span className="text-gray-300 flex-1 truncate">{message}</span>
           <span className="text-gray-500">Draw pile: {drawPile.length}</span>
+          <button
+            onClick={handleExit}
+            onMouseLeave={() => setExitConfirm(false)}
+            className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
+              exitConfirm
+                ? 'bg-red-600 hover:bg-red-500 text-white'
+                : 'bg-gray-700 hover:bg-red-700 text-gray-200'
+            }`}
+          >
+            {exitConfirm ? 'Confirm exit' : 'Exit'}
+          </button>
         </div>
 
         {/* Board */}

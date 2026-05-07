@@ -29,9 +29,13 @@ export function Scoreboard({ scores, onCleared }: Props) {
         <h2 className="text-lg font-semibold text-white">Scoreboard</h2>
         <button
           onClick={handleClear}
-          className="text-xs text-gray-400 hover:text-red-400 transition-colors"
+          className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
+            confirming
+              ? 'bg-red-600 hover:bg-red-500 text-white'
+              : 'bg-gray-700 hover:bg-red-700 text-gray-200'
+          }`}
         >
-          {confirming ? 'Click again to confirm' : 'Reset'}
+          {confirming ? 'Click again to confirm' : 'Reset scores'}
         </button>
       </div>
       <table className="w-full text-sm bg-gray-900 rounded-lg overflow-hidden">

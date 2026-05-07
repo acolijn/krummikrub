@@ -1,6 +1,12 @@
 services:
   krummikrub:
-    build: .
+    build:
+      context: .
+      args:
+        # Public URL prefix the app is served at. Trailing slash REQUIRED.
+        # Use "/" for root-domain deploys, "/krummikrub/" when behind a
+        # subpath reverse-proxy.
+        BASE_PATH: ${BASE_PATH:-/krummikrub/}
     image: krummikrub:latest
     container_name: krummikrub
     restart: unless-stopped

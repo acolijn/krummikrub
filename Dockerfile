@@ -1,5 +1,7 @@
 # ---- build stage ----
 FROM node:22-alpine AS build
+ARG BASE_PATH=/
+ENV BASE_PATH=$BASE_PATH
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
