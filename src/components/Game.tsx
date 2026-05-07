@@ -14,8 +14,10 @@ import { PlayerRack } from './PlayerRack';
 import { OpponentRack } from './OpponentRack';
 import { DrawPile } from './DrawPile';
 import { TileCard } from './TileCard';
+import { Scoreboard } from './Scoreboard';
 import type { Tile, Board, Difficulty } from '../types';
 import { cloneBoard, cloneRack, sortMeldForDisplay } from '../game/logic';
+import { loadNames, saveNames, loadScores, type PlayerNames } from '../store/persistence';
 
 export function Game() {
   const store = useGameStore();
@@ -39,6 +41,8 @@ export function Game() {
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [selectedDifficulty, setSelectedDifficulty] = useState<Difficulty>('medium');
   const [selectedTileIds, setSelectedTileIds] = useState<string[]>([]);
+  const [names, setNames] = useState<PlayerNames>(() => loadNames());
+  const [scores, setScores] = useState(() => loadScores());
   const aiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isHumanTurn = currentPlayerIndex === 0 && phase === 'playing';
@@ -255,10 +259,42 @@ export function Game() {
       { value: 'expert',     label: 'Expert',     desc: 'Deep search: tries combos of up to 3 melds' },
       { value: 'superhuman', label: 'Superhuman', desc: 'Exhaustive: explores every possible combination — never misses a play' },
     ];
+    function updateName(key: keyof PlayerNames, value: string) {
+      setNames(prev => {
+        const next = { ...prev, [key]: value };
+        saveNames(next);
+        return next;
+      });
+    }
+    function handleStart() {
+      saveNames(names);
+      initGame(selectedDifficulty);
+    }
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen gap-8">
+      <div className="flex flex-col items-center justify-start min-h-screen gap-6 py-8 px-4">
         <h1 className="text-5xl font-bold text-white tracking-tight">KrummiKrub</h1>
+
+        <div className="flex flex-col gap-2 w-72">
+          <h2 className="text-sm font-semibold text-gray-300">Players</h2>
+          {([
+            { key: 'human', label: 'You' },
+            { key: 'ai1',   label: 'Opponent 1' },
+            { key: 'ai2',   label: 'Opponent 2' },
+          ] as const).map(p => (
+            <div key={p.key} className="flex items-center gap-2">
+              <span className="text-xs text-gray-400 w-20">{p.label}</span>
+              <input
+                value={names[p.key]}
+                onChange={e => updateName(p.key, e.target.value)}
+                maxLength={20}
+                className="flex-1 px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white text-sm focus:outline-none focus:border-indigo-400"
+              />
+            </div>
+          ))}
+        </div>
+
         <div className="flex flex-col gap-3 w-72">
+          <h2 className="text-sm font-semibold text-gray-300">Difficulty</h2>
           {difficulties.map(d => (
             <button
               key={d.value}
@@ -275,22 +311,28 @@ export function Game() {
           ))}
         </div>
         <button
-          onClick={() => initGame(selectedDifficulty)}
+          onClick={handleStart}
           className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold text-lg transition-colors"
         >
           Start Game
         </button>
+
+        <Scoreboard scores={scores} onCleared={() => setScores({})} />
       </div>
     );
   }
 
   if (phase === 'ended') {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen gap-6">
+      <div className="flex flex-col items-center justify-center min-h-screen gap-6 py-8 px-4">
         <h1 className="text-4xl font-bold text-white">{message}</h1>
         <p className="text-gray-400">{winner?.name} wins!</p>
+        <Scoreboard scores={loadScores()} onCleared={() => setScores({})} />
         <button
-          onClick={() => useGameStore.setState({ phase: 'setup' })}
+          onClick={() => {
+            setScores(loadScores());
+            useGameStore.setState({ phase: 'setup' });
+          }}
           className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold text-lg transition-colors"
         >
           Play Again

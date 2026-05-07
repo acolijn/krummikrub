@@ -11,7 +11,15 @@ Built with React 19 + TypeScript, Vite, Tailwind CSS v4, Zustand, and @dnd-kit.
   - *Easy* — plays a single 3-tile meld per turn
   - *Medium* — greedy: maximises tiles played each turn
   - *Expert* — deep search over combinations of up to 3 melds + extensions
-  - *Superhuman* — exhaustive backtracking; never misses a valid play
+  - *Superhuman* — pool-partition solver: combines board + rack into one tile
+    pool and finds the partition into valid melds that places the maximum
+    number of rack tiles. Subsumes every board manipulation a human would
+    consider — run splits, meld merges, multi-tile rearrangements, joker
+    repositioning — in a single branch-and-bound search seeded with a greedy
+    lower bound. After the initial meld is satisfied, single-tile extensions
+    are also applied so spare rack tiles get dumped onto existing melds.
+- **Custom player names** — pick your own name and your opponents' names; remembered between sessions
+- **Persistent scoreboard** — wins, losses and Rummikub-style points (winner gains opponents' rack values, losers lose their own) are kept across games in your browser
 - **Standard Rummikub rules**
   - Initial meld must score ≥ 30 points from your own tiles
   - Passing without playing forces a draw from the pile
@@ -44,11 +52,18 @@ npm run preview    # preview the production build
 ```
 src/
   ai/           # AI move-finding logic (all difficulty levels)
-  components/   # React components (Game, Board, Rack, Tile…)
+  components/   # React components (Game, Board, Rack, Tile, Scoreboard…)
   game/         # Pure game logic (validation, scoring, deck)
-  store/        # Zustand game state store
+  store/        # Zustand game state store + localStorage persistence (names, scores)
   types/        # Shared TypeScript types
 ```
+
+## Persistence
+
+Player names and the cross-game scoreboard are persisted to `localStorage`
+under the keys `krummikrub.playerNames` and `krummikrub.scores`. Clear the
+scoreboard from the setup screen, or wipe site data in your browser to reset
+both.
 
 ## Rules summary
 

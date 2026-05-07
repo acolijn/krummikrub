@@ -85,17 +85,40 @@ Key pattern: **snapshot before turn → revert if board invalid at end of turn**
 
 ## Phase 5 — AI Player (`src/ai/`)
 
-Two-level approach:
+Four difficulty tiers built on the same meld-enumeration core.
 
-### Level 1 — Move finder
-- Enumerate all valid subsets of rack tiles that form a valid meld
-- Find all ways to extend existing board melds with rack tiles
-- Find all ways to split/rearrange board melds to place rack tiles (limited depth)
+### Shared primitives
+- `findValidMeldsFromRack` — structural enumeration of every group/run a rack
+  can form (handles 3–4 tile groups, 3–13 tile runs, jokers in both)
+- `extendBoardWithRackTile` / `applyExtensions` — iteratively append rack tiles
+  to existing board melds while keeping each meld valid
 
-### Level 2 — Move selector (greedy)
-- Prefer plays that empty the most tiles from the rack
-- Prefer plays that satisfy the initial meld requirement (≥30)
-- Fall back to drawing if no valid play found
+### Difficulty tiers
+- **Easy** — picks the first 3-tile rack meld it finds
+- **Medium** — greedy: scans single melds + pairs of disjoint rack melds, then
+  iteratively extends existing board melds; picks the option placing the most
+  rack tiles
+- **Expert** — same as medium but extends the search to triples of disjoint
+  rack melds before applying single-tile board extensions
+- **Superhuman** — pool-partition solver. Combines all board tiles + rack tiles
+  into one pool and runs a branch-and-bound DFS for the partition into valid
+  melds that
+    1. places every board tile (board tiles can never end up unmelded), and
+    2. maximises the count of rack tiles placed.
+  Canonical-first ordering (smallest tile of each meld) eliminates duplicate
+  partitions; jokers are sorted last so they're only assigned after every real
+  tile has been placed or dropped. The DFS is seeded with the greedy result so
+  the upper-bound prune (`rackUsed + remainingRackCount ≤ bestRackUsed`) bites
+  from the first node. A node-count safety limit keeps pathological pools
+  responsive. Subsumes every board manipulation a human would consider — run
+  splits, meld merges, multi-tile rearrangements, joker repositioning.
+
+### Initial meld path (all tiers)
+First-play turns are handled separately: only rack-only meld combinations
+counting toward ≥30 points are considered (board tiles can't be borrowed).
+After the qualifying combo is laid, `applyExtensions` still dumps any extra
+rack tiles that fit onto existing board melds — the ≥30 rule remains satisfied
+by the rack-only melds laid this turn.
 
 AI turn runs synchronously but is triggered with a short `setTimeout` delay for natural pacing.
 
@@ -152,10 +175,20 @@ Game logic is built and tested before any UI work begins.
 
 ---
 
+## Persistence (`src/store/persistence.ts`)
+
+`localStorage`-backed module providing:
+- Player names (`krummikrub.playerNames`) — picked on the setup screen and
+  reused across games until edited
+- Cross-game scoreboard (`krummikrub.scores`) — wins, losses and Rummikub-style
+  net points per name. On each game-over the winner gains the sum of opponents'
+  remaining rack values (jokers count 30) and each loser is debited their own
+  remaining rack value. Reset button on the setup screen clears the table.
+
 ## Out of Scope (v1)
 
 - Multiplayer / networking
-- Persistent scores / login
+- Server-side scores / login (browser-local only)
 - Mobile touch drag-and-drop optimization
 - Timer per turn
 - Undo history (beyond single-turn revert)

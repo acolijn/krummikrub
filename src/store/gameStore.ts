@@ -9,6 +9,7 @@ import {
   meetsInitialMeldRequirement,
   sortMeldForDisplay,
 } from '../game/logic';
+import { loadNames, recordGame, rackPoints } from './persistence';
 
 interface GameStore extends GameState {
   initGame: (difficulty?: Difficulty) => void;
@@ -24,7 +25,17 @@ interface GameStore extends GameState {
   nextTurn: () => void;
 }
 
-const PLAYER_NAMES = ['You', 'Computer 1', 'Computer 2'];
+function currentNames(): string[] {
+  const n = loadNames();
+  return [n.human, n.ai1, n.ai2];
+}
+
+function recordEnd(players: Player[], winnerIdx: number): void {
+  const names = players.map(p => p.name);
+  const ptsByName: Record<string, number> = {};
+  players.forEach(p => { ptsByName[p.name] = rackPoints(p.rack); });
+  recordGame(names, players[winnerIdx].name, ptsByName);
+}
 
 function makePlayer(id: number, name: string, isHuman: boolean, rack: Tile[]): Player {
   return { id, name, rack, isHuman, hasInitialMeld: false };
@@ -44,10 +55,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
   initGame: (difficulty: Difficulty = 'medium') => {
     let deck = createShuffledDeck();
     const players: Player[] = [];
+    const names = currentNames();
     for (let i = 0; i < 3; i++) {
       const { hand, remaining } = dealTiles(deck, 14);
       deck = remaining;
-      players.push(makePlayer(i, PLAYER_NAMES[i], i === 0, hand));
+      players.push(makePlayer(i, names[i], i === 0, hand));
     }
     const humanRack = players[0].rack;
     set({
@@ -92,11 +104,12 @@ export const useGameStore = create<GameStore>((set, get) => ({
     // If no tiles were played (rack unchanged, board unchanged), force a draw
     const tilesPlayed = snapshot.rack.filter(t => !human.rack.some(r => r.id === t.id));
     if (tilesPlayed.length === 0) {
+      const ai1Name = state.players[1]?.name ?? 'Computer 1';
       if (state.drawPile.length === 0) {
         // Nothing to draw either — just pass
         set({
           currentPlayerIndex: 1,
-          message: `Draw pile empty. ${PLAYER_NAMES[1]} is thinking…`,
+          message: `Draw pile empty. ${ai1Name} is thinking…`,
         });
       } else {
         const [drawn, ...remaining] = state.drawPile;
@@ -107,7 +120,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
             players,
             drawPile: remaining,
             currentPlayerIndex: 1,
-            message: `You drew a tile. ${PLAYER_NAMES[1]} is thinking…`,
+            message: `You drew a tile. ${ai1Name} is thinking…`,
           };
         });
       }
@@ -155,7 +168,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
       set(s => {
         const players = [...s.players];
         players[0] = updatedHuman;
-        return { players, phase: 'ended', winner: updatedHuman, message: 'You win! 🎉' };
+        recordEnd(players, 0);
+        return { players, phase: 'ended', winner: updatedHuman, message: `${updatedHuman.name} wins! 🎉` };
       });
       return { ok: true };
     }
@@ -168,7 +182,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
         players,
         currentPlayerIndex: 1,
         turnSnapshot: null,
-        message: `${PLAYER_NAMES[1]} is thinking…`,
+        message: `${players[1]?.name ?? 'Computer 1'} is thinking…`,
       };
     });
 
@@ -177,11 +191,12 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   drawTile: () => {
     set(state => {
+      const ai1Name = state.players[1]?.name ?? 'Computer 1';
       if (state.drawPile.length === 0) {
         // No tiles to draw – just pass
         return {
           currentPlayerIndex: 1,
-          message: `Draw pile empty. ${PLAYER_NAMES[1]} is thinking…`,
+          message: `Draw pile empty. ${ai1Name} is thinking…`,
         };
       }
       const [drawn, ...remaining] = state.drawPile;
@@ -191,7 +206,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
         players,
         drawPile: remaining,
         currentPlayerIndex: 1,
-        message: `You drew a tile. ${PLAYER_NAMES[1]} is thinking…`,
+        message: `You drew a tile. ${ai1Name} is thinking…`,
       };
     });
   },
@@ -206,6 +221,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
       // Check win
       if (rack.length === 0) {
+        recordEnd(players, idx);
         return {
           board: displayBoard,
           players,
@@ -234,7 +250,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       }
       return {
         currentPlayerIndex: next,
-        message: `${PLAYER_NAMES[next]} is thinking…`,
+        message: `${state.players[next]?.name ?? `Computer ${next}`} is thinking…`,
       };
     });
   },

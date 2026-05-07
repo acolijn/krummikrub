@@ -170,6 +170,8 @@ export interface AiMove {
  *             and finds the partition into valid melds that places the most
  *             rack tiles. Subsumes every board manipulation (run splits, meld
  *             merges, multi-tile rearrangements, joker repositioning).
+ *             Seeded with a greedy lower bound so branch-and-bound prunes
+ *             from the first node.
  */
 export function findBestMove(
   rack: Tile[],
@@ -183,7 +185,16 @@ export function findBestMove(
     const qualifying = findInitialMeldCombinations(rack, rackMelds, board);
     if (qualifying.length === 0) return null;
     qualifying.sort((a, b) => b.tilesPlaced - a.tilesPlaced);
-    return qualifying[0];
+    const best = qualifying[0];
+    // After laying the qualifying combo, dump any extra rack tiles that fit
+    // onto existing board melds. The ≥30 rule is satisfied by the rack-only
+    // melds we just laid, so extending other melds with single rack tiles
+    // doesn't violate it.
+    const ext = applyExtensions(best.board, best.newRack, best.tilesPlaced);
+    if (ext.placed > best.tilesPlaced) {
+      return { board: ext.board, newRack: ext.rack, tilesPlaced: ext.placed, hasInitialMeld: true };
+    }
+    return best;
   }
 
   if (difficulty === 'easy') {
@@ -374,7 +385,11 @@ interface PartitionResult {
   rackIdsPlaced: Set<string>;
 }
 
-function findBestPartition(boardTiles: Tile[], rackTiles: Tile[]): PartitionResult {
+function findBestPartition(
+  boardTiles: Tile[],
+  rackTiles: Tile[],
+  seed?: { rackUsed: number; melds: Meld[]; rackIds: Set<string> }
+): PartitionResult {
   const slots: Slot[] = [
     ...boardTiles.map(t => ({ tile: t, isRack: false } as Slot)),
     ...rackTiles.map(t => ({ tile: t, isRack: true } as Slot)),
@@ -384,9 +399,11 @@ function findBestPartition(boardTiles: Tile[], rackTiles: Tile[]): PartitionResu
   const inUse = new Array<boolean>(N).fill(true);
   const allRackIds = new Set(rackTiles.map(t => t.id));
 
-  let bestRackUsed = -1;
-  let bestMelds: Meld[] = [];
-  let bestRackIds = new Set<string>();
+  // Seed best with a cheap lower-bound (e.g. greedy result) so the bound prune
+  // kicks in immediately. -1 means no solution yet.
+  let bestRackUsed = seed ? seed.rackUsed : -1;
+  let bestMelds: Meld[] = seed ? seed.melds : [];
+  let bestRackIds = seed ? seed.rackIds : new Set<string>();
   let nodes = 0;
   const NODE_LIMIT = 1500000;
 
@@ -512,8 +529,9 @@ function findBestPartition(boardTiles: Tile[], rackTiles: Tile[]): PartitionResu
       if (lowJokers > jokerIdxs.length) continue;
       // Pre-place leading jokers (positions start..sNum-1)
       for (let i = 0; i < lowJokers; i++) positionIdxs.push(jokerIdxs[i]);
-      for (let end = sNum + 2; end <= 13; end++) {
-        if (end - start + 1 < 3) continue;
+      // end must satisfy length ≥ 3 (end ≥ start + 2) AND include anchor (end ≥ sNum).
+      const minEnd = Math.max(sNum, start + 2);
+      for (let end = minEnd; end <= 13; end++) {
         buildPos(sNum, end, lowJokers);
       }
       for (let i = 0; i < lowJokers; i++) positionIdxs.pop();
@@ -578,7 +596,18 @@ function findBestPartition(boardTiles: Tile[], rackTiles: Tile[]): PartitionResu
 }
 
 function findExhaustiveMove(rack: Tile[], board: Board): AiMove | null {
-  const result = findBestPartition(board.flat(), rack);
+  // Seed the partition with a cheap greedy lower bound so the upper-bound
+  // prune kicks in from the first node. The greedy result is a valid
+  // (board, rack) split; we just convert it into the partition's frame.
+  const rackMelds = findValidMeldsFromRack(rack);
+  const greedy = findGreedyMove(rack, board, rackMelds);
+  let seed: { rackUsed: number; melds: Meld[]; rackIds: Set<string> } | undefined;
+  if (greedy && isBoardValid(greedy.board)) {
+    const placedIds = new Set(rack.map(t => t.id).filter(id => !greedy.newRack.some(t => t.id === id)));
+    seed = { rackUsed: greedy.tilesPlaced, melds: greedy.board.map(m => sortMeldForDisplay([...m])), rackIds: placedIds };
+  }
+
+  const result = findBestPartition(board.flat(), rack, seed);
   if (result.rackIdsPlaced.size === 0) return null;
   // Sanity check — partition must rebuild a valid board.
   if (!isBoardValid(result.melds)) return null;
