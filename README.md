@@ -58,6 +58,46 @@ src/
   types/        # Shared TypeScript types
 ```
 
+## Deployment (Docker + host nginx)
+
+The repo ships a multi-stage [Dockerfile](Dockerfile) (`node:22-alpine`
+build → `nginx:1.27-alpine` serve) and a [docker-compose.yml](docker-compose.yml)
+that binds the container's port 80 to the host's `127.0.0.1:8080`. The
+intended layout: docker container serves the SPA on a localhost-only port,
+the host's existing nginx reverse-proxies your public domain to it (TLS
+terminated at the host, certbot handles certs).
+
+### One-time server setup
+
+```bash
+# 1. Get the code on the server
+git clone <your-fork-url> /opt/krummikrub
+cd /opt/krummikrub
+
+# 2. Build & run
+docker compose up -d --build
+
+# 3. Wire host nginx (edit server_name first)
+sudo cp deploy/nginx-host.conf.example /etc/nginx/sites-available/krummikrub.conf
+sudo $EDITOR /etc/nginx/sites-available/krummikrub.conf      # set server_name
+sudo ln -s /etc/nginx/sites-available/krummikrub.conf /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+
+# 4. (Optional) HTTPS
+sudo certbot --nginx -d krummikrub.example.com
+```
+
+### Updating
+
+```bash
+cd /opt/krummikrub
+git pull
+docker compose up -d --build
+```
+
+The container is stateless — all game state (names, scoreboard) lives in
+the player's browser via `localStorage`, so rebuilds don't lose anything.
+
 ## Persistence
 
 Player names and the cross-game scoreboard are persisted to `localStorage`

@@ -61,6 +61,16 @@ export function Game() {
       if (move) {
         commitAiTurn(move.board, move.newRack, move.hasInitialMeld);
       } else {
+        // Diagnostic: capture state when AI passes so we can inspect "why didn't it play?"
+        if (import.meta.env.DEV) {
+          console.warn('[AI draw]', {
+            difficulty: store.difficulty,
+            player: player.name,
+            hasInitialMeld: player.hasInitialMeld,
+            rack: player.rack.map(x => x.isJoker ? 'J' : `${x.color[0]}${x.number}`),
+            board: board.map(m => m.map(x => x.isJoker ? 'J' : `${x.color[0]}${x.number}`).join('-')),
+          });
+        }
         // Draw a tile
         if (drawPile.length > 0) {
           const [drawn, ...rest] = drawPile;
