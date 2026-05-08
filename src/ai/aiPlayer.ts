@@ -257,10 +257,17 @@ export function findBestMove(
     if (qualifying.length === 0) return null;
     qualifying.sort((a, b) => b.tilesPlaced - a.tilesPlaced);
     const best = qualifying[0];
-    // After laying the qualifying combo, dump any extra rack tiles that fit
-    // onto existing board melds. The ≥30 rule is satisfied by the rack-only
-    // melds we just laid, so extending other melds with single rack tiles
-    // doesn't violate it.
+    // For superhuman: run the full pool-partition solver on the remaining rack
+    // tiles now that the initial meld is committed. This lets the AI rearrange
+    // all on-table tiles + remaining rack tiles optimally, not just tack on
+    // single tiles one at a time.
+    if (difficulty === 'superhuman') {
+      const exhaustive = findExhaustiveMove(best.newRack, best.board);
+      return exhaustive ?? best;
+    }
+    // For other difficulties: extend with single-tile board additions.
+    // The ≥30 rule is satisfied by the rack-only melds we just laid, so
+    // extending other melds with single rack tiles doesn't violate it.
     const ext = applyExtensions(best.board, best.newRack, best.tilesPlaced);
     if (ext.placed > best.tilesPlaced) {
       return { board: ext.board, newRack: ext.rack, tilesPlaced: ext.placed, hasInitialMeld: true };
