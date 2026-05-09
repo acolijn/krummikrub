@@ -671,6 +671,100 @@ function findBestPartition(
   return { melds: bestMelds, rackIdsPlaced: bestRackIds };
 }
 
+// ─── Joker vulnerability & migration ─────────────────────────────────────────
+//
+// After the pool-partition solver commits its result it may leave jokers in
+// positions that opponents can immediately steal:
+//   Case 1 — redundant in a group: {4r,4b,4k,★} → removing ★ keeps a valid
+//             3-tile group, so any opponent who has the missing color can take it.
+//   Case 2 — interior of a splittable run: {3-4-5-★-7-8-9} → both sides are
+//             valid melds on their own, so any opponent can split and pocket ★.
+//
+// Solution: after the solver, try to move each vulnerable joker to a safer
+// position elsewhere on the board (end of a run, extending a 3-tile group to 4)
+// without changing which rack tiles were played.
+
+function isJokerVulnerable(meld: Meld, jokerPos: number): boolean {
+  // Case 1: removing the joker still leaves a valid meld.
+  const without = meld.filter((_, k) => k !== jokerPos);
+  if (without.length >= 3 && isValidMeld(without)) return true;
+
+  // Case 2: joker is interior to a run and both sides are independently valid.
+  if (jokerPos > 0 && jokerPos < meld.length - 1) {
+    const left = meld.slice(0, jokerPos);
+    const right = meld.slice(jokerPos + 1);
+    if (left.length >= 3 && right.length >= 3 && isValidMeld(left) && isValidMeld(right)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Post-process a solved board by relocating vulnerable jokers to safer spots.
+ * Never changes which rack tiles were played — only reshuffles board tiles.
+ * Returns the improved board (may be the same object if nothing changed).
+ */
+function migrateVulnerableJokers(board: Board): Board {
+  let current = board.map(m => [...m]); // shallow-copy each meld
+
+  let progress = true;
+  while (progress) {
+    progress = false;
+
+    outer:
+    for (let mi = 0; mi < current.length; mi++) {
+      const meld = current[mi];
+      for (let ji = 0; ji < meld.length; ji++) {
+        if (!meld[ji].isJoker) continue;
+        if (!isJokerVulnerable(meld, ji)) continue;
+
+        const joker = meld[ji];
+
+        // Build the "source" board state after extracting the joker.
+        // Case 1: just remove it, meld stays intact.
+        // Case 2: split into two sub-melds (left / right of joker).
+        const without = meld.filter((_, k) => k !== ji);
+        let sourceBoard: Meld[];
+        if (without.length >= 3 && isValidMeld(without)) {
+          // Case 1 — simple removal
+          sourceBoard = current.map((m, i) => i === mi ? without : m);
+        } else {
+          // Case 2 — split
+          const left = meld.slice(0, ji);
+          const right = meld.slice(ji + 1);
+          sourceBoard = [
+            ...current.slice(0, mi),
+            left,
+            right,
+            ...current.slice(mi + 1),
+          ];
+        }
+
+        // Try inserting the joker into every other meld (prepend / append).
+        for (let ti = 0; ti < sourceBoard.length; ti++) {
+          const target = sourceBoard[ti];
+          for (const candidate of [[joker, ...target], [...target, joker]]) {
+            if (!isValidMeld(candidate)) continue;
+            // Check the joker is NOT vulnerable in its new home.
+            const newJokerPos = candidate.indexOf(joker);
+            if (isJokerVulnerable(candidate, newJokerPos)) continue;
+
+            const newBoard = sourceBoard.map((m, i) => i === ti ? sortMeldForDisplay(candidate) : m);
+            if (!isBoardValid(newBoard)) continue;
+
+            current = newBoard;
+            progress = true;
+            break outer;
+          }
+        }
+      }
+    }
+  }
+
+  return current;
+}
+
 function findExhaustiveMove(rack: Tile[], board: Board): AiMove | null {
   // Seed the partition with a cheap greedy lower bound so the upper-bound
   // prune kicks in from the first node. The greedy result is a valid
@@ -687,9 +781,11 @@ function findExhaustiveMove(rack: Tile[], board: Board): AiMove | null {
   if (result.rackIdsPlaced.size === 0) return null;
   // Sanity check — partition must rebuild a valid board.
   if (!isBoardValid(result.melds)) return null;
+  // Post-process: move vulnerable jokers to safer positions.
+  const safeBoard = migrateVulnerableJokers(result.melds);
   const newRack = rack.filter(t => !result.rackIdsPlaced.has(t.id));
   return {
-    board: result.melds,
+    board: safeBoard,
     newRack,
     tilesPlaced: result.rackIdsPlaced.size,
     hasInitialMeld: true,
